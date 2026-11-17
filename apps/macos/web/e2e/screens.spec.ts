@@ -275,69 +275,262 @@ type SpeakersState = readonly [
 	name: string,
 	query: string,
 	act: (page: Page) => Promise<void>,
+	size?: Size,
 ];
 
 const openSpeakers = async (page: Page) => {
 	await page.getByTestId("speakers-trigger").click();
-	await expect(page.getByRole("dialog")).toBeVisible();
+	await expect(page.getByTestId("speakers-panel")).toBeVisible();
 };
+
+/** Opens the panel and the field on the first unnamed voice. */
+const nameFirst = async (page: Page) => {
+	await openSpeakers(page);
+	await page
+		.getByTestId("speakers-section-need")
+		.getByRole("group")
+		.first()
+		.click();
+	await expect(page.getByRole("combobox")).toBeFocused();
+};
+
+/** Picks the highlighted option for "Ann" (Anna, the voice match). */
+const pickAnn = async (page: Page) => {
+	await nameFirst(page);
+	await page.keyboard.type("Ann");
+	await expect(page.getByRole("option", { name: /Anna/ })).toBeVisible();
+	await page.keyboard.press("Enter");
+};
+
+const transcriptName = (page: Page, name: string) =>
+	page
+		.getByTestId("tab-content-transcript")
+		.getByRole("button", { name: new RegExp(`^${name}`) })
+		.first();
 
 const SPEAKERS_STATES: readonly SpeakersState[] = [
 	["none-closed", "scenario=speakers-none", async () => {}],
 	["none", "scenario=speakers-none", openSpeakers],
-	["me-closed", "scenario=speakers-me", async () => {}],
-	["me", "scenario=speakers-me", openSpeakers],
+	// Every voice leads a paragraph, so each row shows its line and play.
+	["partly-closed", "scenario=speakers-partly", async () => {}],
+	["partly", "scenario=speakers-partly", openSpeakers],
+	["check-closed", "scenario=speakers-check", async () => {}],
+	["check", "scenario=speakers-check", openSpeakers],
+	["done-closed", "scenario=speakers-done", async () => {}],
+	["done", "scenario=speakers-done", openSpeakers],
 	[
-		"me-editing",
-		"scenario=speakers-me",
+		"finding",
+		"scenario=speakers-finding",
 		async (page) => {
-			await openSpeakers(page);
-			await page.getByRole("button", { name: "Name Speaker 1" }).click();
+			await expect(page.getByTestId("speakers-finding")).toBeDisabled();
+		},
+	],
+	["me-unnamed", "scenario=speakers-me-unnamed", openSpeakers],
+	// Me named: "Nicolai · You" among the people, without a play.
+	["me-named", "scenario=speakers-me", openSpeakers],
+	[
+		"keyboard",
+		"scenario=speakers-partly",
+		async (page) => {
+			await page.getByTestId("speakers-trigger").focus();
+			await page.keyboard.press("Enter");
+			await expect(page.getByTestId("speakers-panel")).toBeVisible();
+			await page.keyboard.press("ArrowDown");
+		},
+	],
+	[
+		// Keyboard focus on the voice match: its Y, N and P keys show.
+		"keyboard-hints",
+		"scenario=speakers-partly",
+		async (page) => {
+			await page.getByTestId("speakers-trigger").focus();
+			await page.keyboard.press("Enter");
+			await expect(page.getByTestId("speakers-panel")).toBeVisible();
+			await expect(
+				page.getByTestId("speakers-panel").locator("kbd").first(),
+			).toBeVisible();
+		},
+	],
+	[
+		// Confirmed with Y, the row stays in place, done, and opens again.
+		"reopened",
+		"scenario=speakers-partly",
+		async (page) => {
+			await page.getByTestId("speakers-trigger").focus();
+			await page.keyboard.press("Enter");
+			await expect(page.getByTestId("speakers-panel")).toBeVisible();
+			await page.keyboard.press("y");
+			await expect(
+				page.getByTestId("speakers-section-check").getByLabel("Named"),
+			).toBeVisible();
+			await page.keyboard.press("Enter");
 			await expect(page.getByRole("option").first()).toBeVisible();
 		},
 	],
 	[
-		"me-typing",
-		"scenario=speakers-me",
+		"editing",
+		"scenario=speakers-none",
 		async (page) => {
-			await openSpeakers(page);
-			await page.getByRole("button", { name: "Name Speaker 1" }).click();
+			await nameFirst(page);
+			await expect(page.getByRole("option").first()).toBeVisible();
+		},
+	],
+	[
+		"typing",
+		"scenario=speakers-none",
+		async (page) => {
+			await nameFirst(page);
 			await page.keyboard.type("Ann");
 			await expect(page.getByRole("option", { name: /Create/ })).toBeVisible();
+			// The keys' highlight draws the menu rows' inset focus line.
+			await expectFocusLine(page.locator('[role="option"][data-highlighted]'));
 		},
 	],
-	["partly", "", openSpeakers],
+	[
+		"searching",
+		"scenario=speakers-options-slow",
+		async (page) => {
+			await nameFirst(page);
+			await page.keyboard.type("Ann");
+			await expect(page.getByTestId("speaker-options-searching")).toBeVisible();
+		},
+	],
+	[
+		"options-failed",
+		"scenario=speakers-options-failed",
+		async (page) => {
+			await nameFirst(page);
+			await page.keyboard.type("Ann");
+			await expect(page.getByTestId("speaker-options-failed")).toBeVisible();
+			await expect(
+				page.getByRole("option", { name: /Create/ }),
+			).toHaveAttribute("aria-selected", "true");
+		},
+	],
+	[
+		"saving",
+		"scenario=speakers-saving",
+		async (page) => {
+			await pickAnn(page);
+			await expect(page.getByText("Saving")).toBeVisible();
+		},
+	],
+	[
+		"failed",
+		"scenario=speakers-select-failed",
+		async (page) => {
+			await pickAnn(page);
+			await expect(page.getByRole("alert")).toContainText("database is locked");
+			await expect(page.getByRole("combobox")).toHaveValue("Ann");
+		},
+	],
+	[
+		"advanced",
+		"scenario=speakers-none",
+		async (page) => {
+			await pickAnn(page);
+			await expect(page.getByRole("combobox")).toHaveAttribute(
+				"aria-label",
+				"Name for Speaker 2",
+			);
+		},
+	],
 	["split", "scenario=speakers-split", openSpeakers],
 	[
-		"transcript-rename",
-		"scenario=speakers-me&tab=transcript",
+		"combine",
+		"scenario=speakers-split",
 		async (page) => {
-			await page
-				.getByRole("button", { name: "Speaker 1", exact: true })
-				.first()
-				.click();
-			await expect(page.getByRole("option").first()).toBeVisible();
+			await openSpeakers(page);
+			await page.getByRole("button", { name: "Same person" }).click();
+			await expect(page.getByTestId("confirm-dialog")).toContainText(
+				"cannot be undone",
+			);
+		},
+	],
+	[
+		"transcript",
+		"scenario=speakers-partly&tab=transcript",
+		async (page) => {
+			await expect(
+				page.getByTestId(/^speaker-suggested-/).first(),
+			).toBeVisible();
 		},
 	],
 	[
 		"transcript-tooltip",
-		"scenario=speakers-me&tab=transcript",
+		"scenario=speakers-partly&tab=transcript",
 		async (page) => {
-			await page
-				.getByRole("button", { name: "Nicolai", exact: true })
-				.first()
-				.hover();
-			await expect(page.getByText("Click to rename")).toBeVisible();
+			await transcriptName(page, "Anna").hover();
+			await expect(
+				page.getByText("Sounds like Anna. Click to confirm or change"),
+			).toBeVisible();
 		},
 	],
+	[
+		"transcript-panel",
+		"scenario=speakers-partly&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Anna").click();
+			await expect(page.getByRole("option").first()).toBeVisible();
+		},
+	],
+	[
+		"transcript-unnamed",
+		"scenario=speakers-partly&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Speaker 4").click();
+			await expect(page.getByRole("option").first()).toBeVisible();
+		},
+	],
+	["long", "scenario=speakers-long", openSpeakers],
+	[
+		"long-transcript-960",
+		"scenario=speakers-long&tab=transcript",
+		async (page) => {
+			// The long name truncates; the turn's time stays on its line.
+			const turn = page.getByTestId(/^turn-/).nth(1);
+			await expect(turn.locator(".font-mono")).toBeInViewport({ ratio: 1 });
+			await expect(turn.getByRole("button")).toHaveAttribute(
+				"aria-label",
+				/Hohenzollern-Sigmaringen$/,
+			);
+		},
+		{ width: 960, height: 600 },
+	],
+	[
+		"long-960",
+		"scenario=speakers-long",
+		openSpeakers,
+		{ width: 960, height: 600 },
+	],
+	// 200 % zoom: the 1200 by 760 window as a 600 by 380 viewport.
+	["zoom-200", "", openSpeakers, { width: 600, height: 380 }],
+	[
+		"zoom-200-editing",
+		"scenario=speakers-none",
+		nameFirst,
+		{ width: 600, height: 380 },
+	],
+	[
+		"zoom-200-transcript",
+		"scenario=speakers-partly&tab=transcript",
+		async (page) => {
+			await transcriptName(page, "Speaker 4").click();
+			await expect(page.getByRole("option").first()).toBeVisible();
+		},
+		{ width: 600, height: 380 },
+	],
+	// Below 18 rem the pill shows the count alone and opens the same panel.
+	["narrow-count", "", openSpeakers, { width: 320, height: 640 }],
 ];
 
-/** The speakers button and popover, at 1200 by 760, in each naming state. */
+/** The speakers pill and panel, at 1200 by 760 unless said, in each naming state. */
 for (const scheme of SCHEMES) {
-	for (const [name, query, act] of SPEAKERS_STATES) {
+	for (const [name, query, act, size] of SPEAKERS_STATES) {
 		test(`main ${scheme} speakers-${name}`, async ({ page }) => {
 			const external = watchExternalRequests(page);
-			await page.setViewportSize({ width: 1200, height: 760 });
+			const viewport = size ?? { width: 1200, height: 760 };
+			await page.setViewportSize(viewport);
 			const params = [query, scheme === "dark" ? "dark" : ""]
 				.filter(Boolean)
 				.join("&");
@@ -345,6 +538,23 @@ for (const scheme of SCHEMES) {
 			await settle(page);
 			await act(page);
 			await settle(page);
+			const panel = page.getByTestId("speakers-panel");
+			if (await panel.isVisible()) {
+				// The panel fits the viewport, height included.
+				const box = await panel.boundingBox();
+				expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(
+					viewport.height,
+				);
+				expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(
+					viewport.width,
+				);
+			}
+			if (name === "zoom-200-editing" || name === "zoom-200-transcript") {
+				// Cut short at 200 %, the panel says it scrolls: its end fades.
+				await expect(
+					page.locator('[data-testid="popup-scroll"][data-overflow-y-end]'),
+				).toBeVisible();
+			}
 			await page.screenshot({
 				path: `${OUT}/main-${scheme}-speakers-${name}.png`,
 			});

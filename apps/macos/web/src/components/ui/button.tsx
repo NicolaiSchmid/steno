@@ -68,6 +68,8 @@ export const buttonVariants = cva(
 				name: "h-6 gap-1 rounded-md px-[7px] font-semibold text-title [&_svg]:size-3.5",
 				sm: "h-8 gap-1.5 px-[11px]",
 				md: "h-9 px-[15px]",
+				/** The meeting header's speakers pill: 28 px, fully rounded, 13/500. */
+				pill: "h-7 gap-1.5 rounded-full px-[9px] font-medium text-label [&_svg]:size-3.5",
 				"icon-xs": "size-6 rounded-md p-0 [&_svg]:size-3.5",
 				"icon-sm": "size-7 p-0",
 				icon: "size-8 p-0",

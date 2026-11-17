@@ -28,7 +28,7 @@
     {
       "assignment" : "confirmed",
       "clusterLabel" : "Speaker 1",
-      "colorIndex" : 0,
+      "colorIndex" : 7,
       "displayName" : "Nicolai",
       "email" : "nicolai@example.com",
       "hasClip" : true,
@@ -39,7 +39,7 @@
     {
       "assignment" : "confirmed",
       "clusterLabel" : "Speaker 2",
-      "colorIndex" : 1,
+      "colorIndex" : 4,
       "displayName" : "Jérôme",
       "hasClip" : true,
       "id" : "00000000-0000-0000-0000-000000000015",
@@ -49,7 +49,7 @@
     {
       "assignment" : "suggested",
       "clusterLabel" : "Speaker 3",
-      "colorIndex" : 2,
+      "colorIndex" : 1,
       "displayName" : "Anna",
       "hasClip" : true,
       "id" : "00000000-0000-0000-0000-000000000016",
@@ -60,7 +60,7 @@
     {
       "assignment" : "unknown",
       "clusterLabel" : "Speaker 4",
-      "colorIndex" : 3,
+      "colorIndex" : 0,
       "displayName" : "Speaker 4",
       "hasClip" : false,
       "id" : "00000000-0000-0000-0000-000000000017",
@@ -105,7 +105,7 @@
   ],
   "tasks" : [
     {
-      "assigneeColorIndex" : 1,
+      "assigneeColorIndex" : 4,
       "assigneeName" : "Jérôme",
       "done" : false,
       "dueDate" : "2026-10-02T12:50:00.000Z",
@@ -114,7 +114,7 @@
       "text" : "Zahlen für beide Szenarien"
     },
     {
-      "assigneeColorIndex" : 0,
+      "assigneeColorIndex" : 7,
       "assigneeName" : "Nicolai",
       "done" : true,
       "id" : "00000000-0000-0000-0000-0000000000C9",

@@ -53,10 +53,10 @@ public enum BridgeSamples {
   ])
 
   static let chips: [SpeakerChip] = [
-    .init(id: speakerNicolai, initial: "N", colorIndex: 0, isConfirmed: true),
-    .init(id: speakerJerome, initial: "J", colorIndex: 1, isConfirmed: true),
-    .init(id: speakerAnna, initial: "A", colorIndex: 2, isConfirmed: true),
-    .init(id: speakerUnknown, initial: "?", colorIndex: 3, isConfirmed: false),
+    .init(id: speakerNicolai, initial: "N", colorIndex: 7, isConfirmed: true),
+    .init(id: speakerJerome, initial: "J", colorIndex: 4, isConfirmed: true),
+    .init(id: speakerAnna, initial: "A", colorIndex: 1, isConfirmed: true),
+    .init(id: speakerUnknown, initial: "?", colorIndex: 0, isConfirmed: false),
   ]
 
   public static let meetingsList = MeetingsListSnapshot(
@@ -102,19 +102,19 @@ public enum BridgeSamples {
       .init(
         id: speakerNicolai, clusterLabel: "Speaker 1", displayName: "Nicolai",
         assignment: .confirmed,
-        personID: personNicolai, email: "nicolai@example.com", colorIndex: 0, hasClip: true,
+        personID: personNicolai, email: "nicolai@example.com", colorIndex: 7, hasClip: true,
         isPlaying: false),
       .init(
         id: speakerJerome, clusterLabel: "Speaker 2", displayName: "Jérôme", assignment: .confirmed,
-        personID: personJerome, colorIndex: 1, hasClip: true, isPlaying: false),
+        personID: personJerome, colorIndex: 4, hasClip: true, isPlaying: false),
       .init(
         id: speakerAnna, clusterLabel: "Speaker 3", displayName: "Anna", assignment: .suggested,
-        personID: personAnna, suggestionName: "Anna", colorIndex: 2, hasClip: true, isPlaying: false
+        personID: personAnna, suggestionName: "Anna", colorIndex: 1, hasClip: true, isPlaying: false
       ),
       .init(
         id: speakerUnknown, clusterLabel: "Speaker 4", displayName: "Speaker 4",
         assignment: .unknown,
-        colorIndex: 3, hasClip: false, isPlaying: false),
+        colorIndex: 0, hasClip: false, isPlaying: false),
     ],
     templates: [
       .init(id: "default", name: "Meeting notes"), .init(id: "standup", name: "Standup"),
@@ -162,11 +162,11 @@ public enum BridgeSamples {
     tasks: [
       .init(
         id: uuid(200), text: "Zahlen für beide Szenarien", assigneeName: "Jérôme",
-        assigneeColorIndex: 1,
+        assigneeColorIndex: 4,
         dueDate: startedAt.addingTimeInterval(3 * 86_400), priority: .normal, done: false),
       .init(
         id: uuid(201), text: "Entscheidung im Investor-Update ansprechen", assigneeName: "Nicolai",
-        assigneeColorIndex: 0, dueDate: nil, priority: .high, done: true),
+        assigneeColorIndex: 7, dueDate: nil, priority: .high, done: true),
     ],
     decisions: [
       "Wir setzen neunzig Prozent auf den Kern. Nebenprojekte pausieren bis zur Q1-Planung."

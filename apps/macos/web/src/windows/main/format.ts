@@ -270,19 +270,3 @@ export function firstSentence(reason: string): string {
 	const match = /^.*?\.(?=\s|$)/.exec(firstLine);
 	return match ? match[0] : firstLine;
 }
-
-/** "Nicolai, Jérôme, Anna +1": the named people, then how many are unnamed. */
-export function formatPeople(
-	speakers: MeetingDetailSnapshot["speakers"],
-): string {
-	const named = speakers
-		.filter((speaker) => speaker.assignment !== "unknown")
-		.map((speaker) => speaker.displayName);
-	const unnamed = speakers.length - named.length;
-	if (named.length === 0) {
-		return unnamed === 0
-			? "No speakers yet"
-			: `${unnamed} unnamed ${unnamed === 1 ? "speaker" : "speakers"}`;
-	}
-	return unnamed > 0 ? `${named.join(", ")} +${unnamed}` : named.join(", ");
-}

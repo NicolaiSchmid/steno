@@ -21,3 +21,20 @@ export const focusWithinRingClass =
  */
 export const focusInsetClass =
 	"focus-visible:outline-2 focus-visible:outline-focus focus-visible:outline-solid focus-visible:-outline-offset-2";
+
+/**
+ * The same inset line on the highlighted option of a combobox whose focus
+ * stays in its field (`aria-activedescendant`), so the option itself is
+ * never focused: drawn while the listbox carries `data-keys`, that is while
+ * the keys, not the pointer, moved the highlight.
+ */
+export const activeInsetClass =
+	"in-data-keys:data-highlighted:outline-2 in-data-keys:data-highlighted:outline-focus in-data-keys:data-highlighted:outline-solid in-data-keys:data-highlighted:-outline-offset-2";
+
+/**
+ * The ring inside a row of a scrolling list (the speakers panel), where an
+ * outside ring would be clipped by the scroll: drawn inset, on the row's
+ * own fill, which the contrast test measures as a row host.
+ */
+export const focusRowClass =
+	"outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-inset";

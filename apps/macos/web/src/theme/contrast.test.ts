@@ -310,6 +310,54 @@ function checks(mode: Mode): Check[] {
 		NON_TEXT,
 	);
 
+	// The speakers pill and panel. The pill sits on the canvas: amber
+	// (`warning-outline`, its words measured with the tones above), neutral
+	// (`outline`, the control fill) and dashed (the outline above). Its
+	// avatars are `solid`, the tint mixed into the canvas, since a 16 %
+	// tint over the hovered amber falls to 4.2 in dark; the unnamed "?"
+	// avatar is muted on the border fill. Yes,
+	// Change and the neutral pill are words on the control fill, in the
+	// panel and on the canvas; "Saving", the reasons and the line a voice
+	// said are muted on the panel's rows, and the dashed chip is the dashed
+	// outline there (both measured on every host above). So are "No sample"
+	// and the P key hint beside a play, muted on a row and its hover, and
+	// the N hint in Change, muted on the accent hover; the Y hint sits in
+	// Yes, muted on the control fill, measured below. The hints are
+	// bordered keycaps (`Kbd variant="cap"`): the letter carries them, the
+	// `--border` outline only sets them apart from the button's word.
+	for (const person of PEOPLE) {
+		on(
+			person,
+			[{ name: `${person}-solid`, colour: token(mode, `${person}-solid`) }],
+			TEXT,
+		);
+	}
+	on(
+		"--muted-foreground",
+		[
+			{
+				name: "--border (the unnamed avatar)",
+				colour: token(mode, "--border"),
+			},
+		],
+		TEXT,
+	);
+	const controls = (["canvas", "popover"] as const).flatMap((surface) =>
+		(["--control", "--control-hover"] as const).map((fill) => ({
+			name: `${fill} over ${surface}`,
+			colour: layers(
+				token(mode, "--surface", surface),
+				token(mode, fill, surface),
+			),
+		})),
+	);
+	on("--foreground", controls, TEXT);
+	on(
+		"--muted-foreground",
+		controls.filter((host) => host.name.endsWith("popover")),
+		TEXT,
+	);
+
 	// The underline tab's indicator on the canvas and a card.
 	on("--tab-indicator", everyHost(mode, ["canvas", "card"]), NON_TEXT);
 

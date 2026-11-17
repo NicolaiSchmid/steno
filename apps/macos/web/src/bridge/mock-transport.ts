@@ -1,3 +1,4 @@
+import { personColor } from "@/lib/person-color";
 import type {
 	ExportSettingsSnapshot,
 	GeneralSettingsSnapshot,
@@ -6,7 +7,9 @@ import type {
 	MeetingsListSnapshot,
 	OnboardingSnapshot,
 	PhoneSettingsSnapshot,
+	ProgressSnapshot,
 	RecordingSnapshot,
+	SpeakerOption,
 	SpeakerOptionsReply,
 	SummariesSettingsSnapshot,
 	TranscriptionSettingsSnapshot,
@@ -263,8 +266,8 @@ function bareDetail(
  * incomplete), `summary-key-withheld` (the selected meeting's summary
  * skipped while the API key was withheld, from
  * `meeting.detail.keyWithheld`), and the speaker naming states
- * (`speakersScenario`): `speakers-none`, `speakers-me` and
- * `speakers-split`. `tab=` picks the detail tab. Without either, the
+ * (`speakersScenario`), and `speakers-finding` (the processing meeting
+ * in the Diarize stage). `tab=` picks the detail tab. Without either, the
  * fixtures pass through unchanged.
  */
 export function applyScenario(
@@ -444,7 +447,11 @@ export function applyScenario(
 		}
 	}
 
-	if (scenario === "processing" && list && detail) {
+	if (
+		(scenario === "processing" || scenario === "speakers-finding") &&
+		list &&
+		detail
+	) {
 		const row: MeetingRow = {
 			id: PROCESSING_MEETING_ID,
 			title: "Standup",
@@ -479,6 +486,19 @@ export function applyScenario(
 			},
 			canRerunSummary: false,
 		});
+		if (scenario === "speakers-finding") {
+			result.progress = {
+				entries: [
+					{
+						meetingID: PROCESSING_MEETING_ID,
+						stage: "diarize",
+						title: "Finding speakers",
+						fraction: 0.48,
+						estimatedRemainingSeconds: 40,
+					},
+				],
+			} satisfies ProgressSnapshot;
+		}
 	}
 
 	const tab = detailTab.safeParse(params.get("tab"));
@@ -853,21 +873,74 @@ function applySettingsScenario(
 }
 
 type DetailSpeaker = MeetingDetailSnapshot["speakers"][number];
+type Turn = MeetingDetailSnapshot["transcript"][number];
+
+/** A confirmed name long enough to truncate in the header, the panel and a 400 px column. */
+export const LONG_NAME = "Maximiliane Alexandra von Hohenzollern-Sigmaringen";
+
+/**
+ * The scenarios that bend how the host answers naming rather than the
+ * speakers: the pick never acknowledged (`speakers-saving`), refused
+ * (`speakers-select-failed`), and the options for typed text never
+ * arriving (`speakers-options-slow`) or failing (`speakers-options-failed`).
+ * Each starts from `speakers-none`.
+ */
+const SPEAKER_ANSWER_SCENARIOS = new Set([
+	"speakers-saving",
+	"speakers-select-failed",
+	"speakers-options-slow",
+	"speakers-options-failed",
+]);
+
+/** The host's words for a refused pick (`SelectError::Store`). */
+export const SELECT_FAILURE = "Speaker could not be named: database is locked";
 
 /**
  * The selected meeting's speakers bent into a naming state, its turns
  * handed out among them: `speakers-none` (Me and two speakers, nobody
- * named), `speakers-me` (Me named as the fixture's first person, one
- * speaker left), `speakers-split` (the fixture's unnamed speaker suggested
- * as a person already named here: one person heard as two speakers).
+ * named or suggested), `speakers-me` (Me named as the fixture's first
+ * person, one speaker left), `speakers-me-unnamed` (Me unnamed beside a
+ * named person and an unnamed voice), `speakers-split` (the fixture's
+ * unnamed speaker suggested as a person already named there: one person
+ * heard as two speakers), `speakers-check` (only the voice match left),
+ * `speakers-done` (everyone confirmed) and `speakers-long` (the fixture
+ * with a long confirmed name). Without one of these the fixture's own
+ * speakers stay: two named, a suggestion and an unnamed voice without a
+ * clip; `speakers-partly` keeps them and gives each a paragraph. All but
+ * `speakers-none`, `speakers-me` and `speakers-me-unnamed` spread the
+ * turns over every voice (`spread`).
  */
 function speakersScenario(
 	detail: MeetingDetailSnapshot,
-	scenario: string,
+	requested: string,
 ): MeetingDetailSnapshot {
 	const [first, second, third, fourth] = detail.speakers;
 	if (!first || !second || !third || !fourth) {
 		return detail;
+	}
+	const scenario = SPEAKER_ANSWER_SCENARIOS.has(requested)
+		? "speakers-none"
+		: requested;
+	const confirmed = (speaker: DetailSpeaker, name: string, person: string) => {
+		const { suggestionName: _name, ...rest } = speaker;
+		return {
+			...rest,
+			assignment: "confirmed" as const,
+			displayName: name,
+			personID: person,
+			colorIndex: personColor(person),
+		};
+	};
+	const renamed = (speakers: DetailSpeaker[]) => ({
+		...detail,
+		speakers,
+		transcript: detail.transcript.map((turn) => {
+			const speaker = speakers.find((row) => row.id === turn.speakerID);
+			return speaker ? { ...turn, speakerName: speaker.displayName } : turn;
+		}),
+	});
+	if (scenario === "speakers-partly") {
+		return spread({ ...detail });
 	}
 	if (scenario === "speakers-split") {
 		const { suggestionName: _name, ...rest } = fourth;
@@ -875,17 +948,50 @@ function speakersScenario(
 			...rest,
 			assignment: "suggested",
 			displayName: first.displayName,
-			...(first.personID ? { personID: first.personID } : {}),
+			suggestionName: first.displayName,
+			...(first.personID
+				? { personID: first.personID, colorIndex: personColor(first.personID) }
+				: {}),
 			hasClip: true,
 		};
-		return { ...detail, speakers: [first, second, third, split] };
+		return spread(renamed([first, second, third, split]));
+	}
+	if (scenario === "speakers-check") {
+		return spread({ ...detail, speakers: [first, second, third] });
+	}
+	if (scenario === "speakers-done") {
+		return spread(
+			renamed([
+				first,
+				second,
+				confirmed(third, "Anna", third.personID ?? MOCK_PERSON_ID),
+			]),
+		);
+	}
+	if (scenario === "speakers-long") {
+		return spread(
+			renamed([
+				first,
+				confirmed(second, LONG_NAME, second.personID ?? MOCK_PERSON_ID),
+				third,
+				fourth,
+			]),
+		);
+	}
+	if (
+		scenario !== "speakers-none" &&
+		scenario !== "speakers-me" &&
+		scenario !== "speakers-me-unnamed"
+	) {
+		return detail;
 	}
 	const unnamed = (speaker: DetailSpeaker, label: string): DetailSpeaker => ({
 		id: speaker.id,
 		clusterLabel: label,
 		displayName: label,
 		assignment: "unknown",
-		colorIndex: speaker.colorIndex,
+		// A voice without a person has its own colour, as the hosts fold it.
+		colorIndex: personColor(speaker.id),
 		hasClip: label !== "Me",
 		isPlaying: false,
 	});
@@ -896,7 +1002,9 @@ function speakersScenario(
 	const speakers =
 		scenario === "speakers-me"
 			? [me, unnamed(second, "Speaker 1")]
-			: [me, unnamed(second, "Speaker 1"), unnamed(third, "Speaker 2")];
+			: scenario === "speakers-me-unnamed"
+				? [me, second, unnamed(third, "Speaker 2")]
+				: [me, unnamed(second, "Speaker 1"), unnamed(third, "Speaker 2")];
 	const transcript = detail.transcript.map((turn, index) => {
 		const speaker = speakers[index % speakers.length] ?? me;
 		return {
@@ -908,22 +1016,73 @@ function speakersScenario(
 	return { ...detail, speakers, transcript };
 }
 
+const MOCK_PERSON_ID = "00000000-0000-0000-0000-0000000000FF";
+
+/** A person created outside the app: an ID of its own, from the name. */
+function mockPersonID(name: string): string {
+	let hash = 0;
+	for (const char of name.trim().toLowerCase()) {
+		hash = (hash * 31 + (char.codePointAt(0) ?? 0)) % 0xffffffffff;
+	}
+	return `00000000-0000-0000-0001-${hash.toString(16).padStart(12, "0")}`;
+}
+const SPREAD_TURNS = 6;
+
+/**
+ * The meeting's turns repeated to six and handed round its speakers, so
+ * every voice, the suggested one too, leads a paragraph; turn IDs keep the
+ * fixture's form, numbered on from the last.
+ */
+function spread(detail: MeetingDetailSnapshot): MeetingDetailSnapshot {
+	const turns = detail.transcript;
+	const speakers = detail.speakers;
+	if (turns.length === 0 || speakers.length === 0) {
+		return detail;
+	}
+	const base = Number.parseInt(turns[0]?.id.slice(-12) ?? "0", 16);
+	let at = turns[0]?.startSeconds ?? 0;
+	const transcript = Array.from({ length: SPREAD_TURNS }, (_, index) => {
+		const turn = turns[index % turns.length] as Turn;
+		const speaker = speakers[index % speakers.length] as DetailSpeaker;
+		const startSeconds = at;
+		at += turn.endSeconds - turn.startSeconds;
+		return {
+			...turn,
+			id: `00000000-0000-0000-0000-${(base + index).toString(16).padStart(12, "0")}`,
+			speakerID: speaker.id,
+			speakerName: speaker.displayName,
+			startSeconds,
+			endSeconds: at,
+		};
+	});
+	return { ...detail, transcript };
+}
+
 /**
  * `speakers.options` answered the way the host ranks them, from the
  * recorded reply: its people whose name contains the query, then, once
  * something is typed and no one is called exactly that, a row creating the
  * typed name. The recorded create row is for the recording's own query
  * ("a", `crates/steno-host/tests/parity.rs`), so it is left out. Used by the
- * page outside the app; the unit tests keep the recording.
+ * page outside the app; the unit tests keep the recording. Under
+ * `speakers-options-slow` the answer for typed text never comes, under
+ * `speakers-options-failed` it fails.
  */
 export function answerSpeakerOptions(
 	recorded: SpeakerOptionsReply | undefined,
 	params: unknown,
-): SpeakerOptionsReply {
+	scenario = "",
+): SpeakerOptionsReply | Promise<SpeakerOptionsReply> {
 	const query =
 		typeof params === "object" && params !== null && "query" in params
 			? String(params.query).trim()
 			: "";
+	if (query && scenario === "speakers-options-slow") {
+		return new Promise(() => {});
+	}
+	if (query && scenario === "speakers-options-failed") {
+		throw new BridgeError("speakers.options", "failed", "The store is busy.");
+	}
 	const fold = (text: string) =>
 		text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
 	const people = (recorded?.options ?? []).filter(
@@ -934,6 +1093,85 @@ export function answerSpeakerOptions(
 	return {
 		options:
 			query && !exact ? [...people, { kind: "create", label: query }] : people,
+	};
+}
+
+/**
+ * `speakers.select` outside the app, as the hosts answer it: a pick of a
+ * person who already owns another confirmed voice here is refused as
+ * `wouldCombine` unless it asks to `combine`, and then folds the voice
+ * into the owner's; any other pick confirms the voice as the person. The
+ * returned detail is the meeting as the host republishes it. Under
+ * `speakers-saving` the pick is never acknowledged, under
+ * `speakers-select-failed` it is refused with the host's message.
+ */
+export function answerSpeakerSelect(
+	detail: MeetingDetailSnapshot,
+	params: unknown,
+	scenario = "",
+): MeetingDetailSnapshot | Promise<never> {
+	if (scenario === "speakers-saving") {
+		return new Promise(() => {});
+	}
+	if (scenario === "speakers-select-failed") {
+		throw new BridgeError("speakers.select", "failed", SELECT_FAILURE);
+	}
+	const { speakerID, option, combine } = params as {
+		speakerID: string;
+		option: SpeakerOption;
+		combine: boolean;
+	};
+	const speaker = detail.speakers.find((row) => row.id === speakerID);
+	if (!speaker) {
+		return detail;
+	}
+	const fold = (text: string) => text.trim().toLowerCase();
+	const owner = detail.speakers.find(
+		(row) =>
+			row.id !== speakerID &&
+			row.assignment === "confirmed" &&
+			(option.personID
+				? row.personID === option.personID
+				: fold(row.displayName) === fold(option.label)),
+	);
+	if (owner && !combine) {
+		throw new BridgeError(
+			"speakers.select",
+			"wouldCombine",
+			`${owner.displayName} already speaks as ${owner.clusterLabel} in this meeting.`,
+		);
+	}
+	if (owner) {
+		return {
+			...detail,
+			speakers: detail.speakers.filter((row) => row.id !== speakerID),
+			transcript: detail.transcript.map((turn) =>
+				turn.speakerID === speakerID
+					? { ...turn, speakerID: owner.id, speakerName: owner.displayName }
+					: turn,
+			),
+		};
+	}
+	const { suggestionName: _name, ...rest } = speaker;
+	const personID = option.personID ?? mockPersonID(option.label);
+	const named: DetailSpeaker = {
+		...rest,
+		assignment: "confirmed",
+		displayName: option.label,
+		personID,
+		// A voice takes its person's colour, as the hosts fold it.
+		colorIndex: personColor(personID),
+	};
+	return {
+		...detail,
+		speakers: detail.speakers.map((row) =>
+			row.id === speakerID ? named : row,
+		),
+		transcript: detail.transcript.map((turn) =>
+			turn.speakerID === speakerID
+				? { ...turn, speakerName: option.label }
+				: turn,
+		),
 	};
 }
 

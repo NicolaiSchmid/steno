@@ -18,25 +18,25 @@
           "source" : "call",
           "speakers" : [
             {
-              "colorIndex" : 0,
+              "colorIndex" : 7,
               "id" : "00000000-0000-0000-0000-000000000014",
               "initial" : "N",
               "isConfirmed" : true
             },
             {
-              "colorIndex" : 1,
+              "colorIndex" : 4,
               "id" : "00000000-0000-0000-0000-000000000015",
               "initial" : "J",
               "isConfirmed" : true
             },
             {
-              "colorIndex" : 2,
+              "colorIndex" : 1,
               "id" : "00000000-0000-0000-0000-000000000016",
               "initial" : "A",
               "isConfirmed" : true
             },
             {
-              "colorIndex" : 3,
+              "colorIndex" : 0,
               "id" : "00000000-0000-0000-0000-000000000017",
               "initial" : "?",
               "isConfirmed" : false

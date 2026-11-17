@@ -24,8 +24,16 @@ export const avatarVariants = cva(
 				3: "bg-p4-surface text-p4",
 				unknown: "bg-border text-muted-foreground",
 			},
+			/** Opaque: the tint mixed into the canvas, for a tinted fill underneath. */
+			solid: { true: "", false: "" },
 		},
-		defaultVariants: { size: "md", tone: 0 },
+		compoundVariants: [
+			{ solid: true, tone: 0, className: "bg-p1-solid" },
+			{ solid: true, tone: 1, className: "bg-p2-solid" },
+			{ solid: true, tone: 2, className: "bg-p3-solid" },
+			{ solid: true, tone: 3, className: "bg-p4-solid" },
+		],
+		defaultVariants: { size: "md", tone: 0, solid: false },
 	},
 );
 
@@ -33,7 +41,9 @@ export type AvatarTone = 0 | 1 | 2 | 3 | "unknown";
 
 export interface AvatarProps
 	extends Omit<ComponentProps<typeof BaseAvatar.Root>, "className">,
-		Omit<VariantProps<typeof avatarVariants>, "tone"> {
+		Omit<VariantProps<typeof avatarVariants>, "tone" | "solid"> {
+	/** On a tinted fill (the amber pill): the tint over the canvas, opaque. */
+	solid?: boolean;
 	className?: string;
 	/** The person's position in the meeting; wraps onto the four colours. */
 	index?: number;
@@ -52,6 +62,7 @@ export function avatarTone(index: number): AvatarTone {
 export function Avatar({
 	className,
 	size,
+	solid = false,
 	index = 0,
 	unknown = false,
 	initial,
@@ -64,7 +75,11 @@ export function Avatar({
 		<BaseAvatar.Root
 			aria-label={name}
 			className={cn(
-				avatarVariants({ size, tone: unknown ? "unknown" : avatarTone(index) }),
+				avatarVariants({
+					size,
+					solid,
+					tone: unknown ? "unknown" : avatarTone(index),
+				}),
 				className,
 			)}
 			{...props}

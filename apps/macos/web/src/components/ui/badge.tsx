@@ -15,10 +15,15 @@ export const badgeVariants = cva(
 				outline: "border-border bg-field text-foreground",
 				warning: "bg-warning-surface text-warning-foreground",
 				success: "bg-success-surface text-success-foreground",
+				/** A voice waiting for a name ("Speaker 1"): the dashed outline, no fill. */
+				dashed:
+					"border-dashed-outline border-dashed bg-transparent text-foreground",
 			},
 			size: {
 				md: "",
 				sm: "h-4 min-w-4 rounded-xs px-1 text-caption",
+				/** A chip in a row: 24 px, label type. */
+				chip: "h-6 min-w-6 rounded-md px-[7px] text-label",
 			},
 		},
 		defaultVariants: { variant: "outline", size: "md" },

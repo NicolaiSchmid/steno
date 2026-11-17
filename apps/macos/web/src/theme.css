@@ -195,6 +195,11 @@
 	--p2-surface: color-mix(in srgb, var(--p2) 16%, transparent);
 	--p3-surface: color-mix(in srgb, var(--p3) 16%, transparent);
 	--p4-surface: color-mix(in srgb, var(--p4) 16%, transparent);
+	/* The same tints mixed into the canvas, for an avatar on a tinted fill (the amber speakers pill). */
+	--p1-solid: color-mix(in srgb, var(--p1) 16%, var(--background));
+	--p2-solid: color-mix(in srgb, var(--p2) 16%, var(--background));
+	--p3-solid: color-mix(in srgb, var(--p3) 16%, var(--background));
+	--p4-solid: color-mix(in srgb, var(--p4) 16%, var(--background));
 	--warning-border: color-mix(in srgb, var(--warning) 32%, transparent);
 	--warning-border-hover: color-mix(in srgb, var(--warning) 40%, transparent);
 	--warning-surface-hover: rgba(245, 158, 11, 0.18);
@@ -364,6 +369,10 @@
 	--color-p2-surface: var(--p2-surface);
 	--color-p3-surface: var(--p3-surface);
 	--color-p4-surface: var(--p4-surface);
+	--color-p1-solid: var(--p1-solid);
+	--color-p2-solid: var(--p2-solid);
+	--color-p3-solid: var(--p3-solid);
+	--color-p4-solid: var(--p4-solid);
 	--color-warning-border: var(--warning-border);
 	--color-warning-border-hover: var(--warning-border-hover);
 	--color-warning-surface-hover: var(--warning-surface-hover);
@@ -600,6 +609,31 @@
 			100% calc(1.5rem + 1px),
 			100% calc(100% - 1.5rem);
 		mask-position: top, bottom;
+		mask-repeat: no-repeat;
+	}
+
+	/*
+	 * A popup that scrolls on its own (`PopupScroll`): while content is
+	 * left below, its last 2 rem fade out, the top fade's curve upside
+	 * down, so a panel cut short says it scrolls. At the end nothing fades.
+	 */
+	.scroll-fade-bottom[data-overflow-y-end] {
+		mask-image:
+			linear-gradient(
+				to top,
+				transparent 0%,
+				rgba(0, 0, 0, 0.1) 10%,
+				rgba(0, 0, 0, 0.3) 24%,
+				rgba(0, 0, 0, 0.58) 42%,
+				rgba(0, 0, 0, 0.82) 62%,
+				rgba(0, 0, 0, 0.96) 82%,
+				black 100%
+			),
+			linear-gradient(black, black);
+		mask-size:
+			100% 2rem,
+			100% calc(100% - 2rem);
+		mask-position: bottom, top;
 		mask-repeat: no-repeat;
 	}
 

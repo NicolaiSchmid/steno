@@ -68,8 +68,10 @@ export {
 export type { EmptyStateProps } from "./empty-state";
 export { EmptyState, emptyStateIconVariants } from "./empty-state";
 export {
+	activeInsetClass,
 	focusInsetClass,
 	focusRingClass,
+	focusRowClass,
 	focusWithinRingClass,
 } from "./focus-ring";
 export type { FormCardProps, FormRowProps, FormValueProps } from "./form-row";

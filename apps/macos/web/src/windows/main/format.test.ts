@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
 	createFormatter,
 	firstSentence,
-	formatPeople,
 	formatRetention,
 	formatSource,
 } from "./format";
@@ -149,31 +148,5 @@ describe("words", () => {
 		);
 		expect(firstSentence("\n\nv1.2 failed. Retry.")).toBe("v1.2 failed.");
 		expect(firstSentence("   ")).toBe("No reason was reported.");
-	});
-
-	it("lists the people", () => {
-		const speaker = (
-			displayName: string,
-			assignment: "confirmed" | "unknown",
-		) => ({
-			id: "00000000-0000-0000-0000-000000000001",
-			clusterLabel: "Speaker",
-			displayName,
-			assignment,
-			colorIndex: 0,
-			hasClip: false,
-			isPlaying: false,
-		});
-		expect(
-			formatPeople([
-				speaker("Nicolai", "confirmed"),
-				speaker("Anna", "confirmed"),
-				speaker("Speaker 3", "unknown"),
-			]),
-		).toBe("Nicolai, Anna +1");
-		expect(formatPeople([speaker("Speaker 1", "unknown")])).toBe(
-			"1 unnamed speaker",
-		);
-		expect(formatPeople([])).toBe("No speakers yet");
 	});
 });
