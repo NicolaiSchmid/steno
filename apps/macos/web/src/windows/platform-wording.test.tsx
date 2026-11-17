@@ -225,7 +225,7 @@ describe("onboarding", () => {
 		});
 		renderWithBridge(<OnboardingWindow />, harness, platformFor(os));
 		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(
-			`${asked}, then where summaries come from and where meetings go. Audio never leaves this computer.`,
+			`${asked} first. Audio never leaves this computer.`,
 		);
 	});
 

@@ -17,6 +17,20 @@ export const COLUMNS = {
 /** The reading column never gets narrower than this while a divider moves. */
 const DETAIL_MIN = 400;
 
+/**
+ * Below this window width the sidebar and the list at their minimums would
+ * leave the reading column under `DETAIL_MIN` (840 CSS px; a 1200 px window
+ * at 200 % zoom is 600): both leave the grid for a drawer behind the
+ * header's Meetings button, and the reading column takes the window. The
+ * stored widths stay as they were for when the window is wide again.
+ */
+export const NARROW_BELOW = COLUMNS.sidebar.min + COLUMNS.list.min + DETAIL_MIN;
+
+/** Whether a window `windowWidth` wide shows the reading column alone. */
+export function isNarrow(windowWidth: number) {
+	return windowWidth > 0 && windowWidth < NARROW_BELOW;
+}
+
 export const COLUMN_WIDTHS_KEY = "steno.main.columnWidths";
 
 export type ColumnName = keyof typeof COLUMNS;

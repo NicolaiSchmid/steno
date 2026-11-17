@@ -111,7 +111,10 @@ export function PermissionRow({
 	const copy = permissionCopy(kind, words);
 	let description: string | undefined;
 	if (state !== "granted" && !skipped) {
-		description = copy.explanation;
+		// The Optional badge says it already; the sentence need not repeat it.
+		description = optional
+			? copy.explanation.replace(/ Optional\.$/, "")
+			: copy.explanation;
 	}
 	// Off the Mac the system says nothing before a recording opens the
 	// device, and Steno has no prompt to raise.
@@ -221,6 +224,7 @@ export function PermissionRow({
 
 	return (
 		<FormRow
+			compact={prominent}
 			control={control}
 			data-testid={`permission-${kind}`}
 			description={description}

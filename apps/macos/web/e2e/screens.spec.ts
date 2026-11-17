@@ -373,7 +373,6 @@ const FOCUS_STOPS: Record<string, string> = {
 	"meeting-actions": "button-icon",
 	"speakers-trigger": "header-pill",
 	"tab-summary": "tab",
-	"template-select": "select-template",
 	"setup-summaries": "link",
 	"banner-not-now": "text-button",
 	checkbox: "checkbox",
@@ -432,7 +431,10 @@ for (const scheme of SCHEMES) {
 	 * 600 by 380 CSS-pixel viewport (the shot keeps the 2x device scale, so
 	 * it is 1200 by 760 pixels). Zoom rather than a 200 % root font size,
 	 * because the kit sizes type in rem but spacing and some controls in px,
-	 * and zoom scales both, as WebKit's page zoom does.
+	 * and zoom scales both, as WebKit's page zoom does. The window is narrow
+	 * there: the reading column takes it, its header holds without
+	 * overflowing, every tab can be reached, and the Meetings button opens
+	 * the sidebar and list as a drawer.
 	 */
 	test(`main ${scheme} zoom-200`, async ({ page }) => {
 		const external = watchExternalRequests(page);
@@ -440,8 +442,82 @@ for (const scheme of SCHEMES) {
 		await page.goto(`/#/main?tab=summary${scheme === "dark" ? "&dark" : ""}`);
 		await settle(page);
 		await expect(page.getByTestId("main-window")).toBeVisible();
+		await expect(page.getByTestId("meeting-list")).toHaveCount(0);
 		await page.screenshot({ path: `${OUT}/main-${scheme}-zoom-200.png` });
+
+		const header = page.locator("main header").first();
+		const overflow = await header.evaluate(
+			(element) => element.scrollWidth - element.clientWidth,
+		);
+		expect(overflow).toBeLessThanOrEqual(0);
+		const exportBox = await page.getByTestId("export-meeting").boundingBox();
+		expect(exportBox).not.toBeNull();
+		expect((exportBox?.x ?? 0) + (exportBox?.width ?? 0)).toBeLessThanOrEqual(
+			600,
+		);
+		const crumb = page.locator("main [aria-current=page]");
+		expect((await crumb.boundingBox())?.width ?? 0).toBeGreaterThan(60);
+		for (const tab of ["summary", "transcript", "tasks", "notes"]) {
+			const target = page.getByTestId(`tab-${tab}`);
+			await target.scrollIntoViewIfNeeded();
+			await expect(target).toBeInViewport();
+		}
+
+		await page.getByTestId("show-meetings").click();
+		await expect(page.getByTestId("meetings-drawer")).toBeVisible();
+		await expect(page.getByTestId("meeting-list")).toBeVisible();
+		await settle(page);
+		await page.screenshot({
+			path: `${OUT}/main-${scheme}-zoom-200-meetings.png`,
+		});
+		await page
+			.getByTestId("meeting-00000000-0000-0000-0000-000000000003")
+			.click();
+		await expect(page.getByTestId("meetings-drawer")).toHaveCount(0);
 		expect(external).toEqual([]);
+	});
+
+	/**
+	 * 960 by 600 with the default column widths: the first summary heading
+	 * and the first transcript paragraph show without scrolling, and with
+	 * the recorder held the page crumb keeps its words beside Stop.
+	 */
+	test(`main ${scheme} 960 reading`, async ({ page }) => {
+		await page.setViewportSize({ width: 960, height: 600 });
+		const dark = scheme === "dark" ? "&dark" : "";
+		await page.goto(`/#/main?tab=summary${dark}`);
+		await settle(page);
+		const heading = page.getByTestId("tab-content-summary").locator("h3");
+		await expect(heading.first()).toBeInViewport({ ratio: 1 });
+		await page.goto(`/#/main?tab=transcript${dark}`);
+		await page.reload();
+		await settle(page);
+		await expect(
+			page.getByTestId("tab-content-transcript").locator("p").first(),
+		).toBeInViewport();
+		await page.goto(`/#/main?scenario=recording${dark}`);
+		await page.reload();
+		await settle(page);
+		await expect(page.getByTestId("header-stop")).toBeVisible();
+		const crumb = page.locator("main [aria-current=page]");
+		expect((await crumb.boundingBox())?.width ?? 0).toBeGreaterThan(60);
+	});
+
+	/**
+	 * Onboarding's page 1 fits its 560 by 620 window: in the denied and the
+	 * unknown state the last permission's action shows above the footer.
+	 */
+	test(`onboarding ${scheme} page 1 fits`, async ({ page }) => {
+		await page.setViewportSize(ONBOARDING_SIZE);
+		const dark = scheme === "dark" ? "&dark" : "";
+		for (const scenario of ["onboarding-denied", "onboarding-unknown"]) {
+			await page.goto(`/#/onboarding?scenario=${scenario}${dark}`);
+			await page.reload();
+			await settle(page);
+			await expect(
+				page.getByTestId("permission-localNetwork-skip"),
+			).toBeInViewport({ ratio: 1 });
+		}
 	});
 
 	/** A dialog open with keyboard focus on its primary action. */

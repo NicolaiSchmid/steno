@@ -135,7 +135,7 @@ export function DialogCloseButton({
 
 /** The action band shared by `FooterBand` and `DialogFooter`: trailing buttons on the muted fill. */
 const bandClass =
-	"flex items-center justify-end gap-2 border-border border-t bg-band px-6 py-4";
+	"flex items-center justify-end gap-2 border-border border-t bg-band px-6 py-3";
 
 /** The action band at the foot of a page (onboarding): a `footer` landmark. */
 export function FooterBand({ className, ...props }: ComponentProps<"footer">) {

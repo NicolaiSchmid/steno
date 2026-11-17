@@ -14,7 +14,7 @@ import { ExportSection } from "./export-section";
 import { GeneralSection } from "./general-section";
 import { PhoneSection } from "./iphone-section";
 import { RecordingSection } from "./recording-section";
-import { SECTIONS, type SectionId, sectionInfo } from "./sections";
+import { SECTIONS, type SectionId } from "./sections";
 import { SummariesSection } from "./summaries-section";
 import { TranscriptionSection } from "./transcription-section";
 
@@ -111,10 +111,7 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 				))}
 			</SidebarColumn>
 			<div className="flex min-h-0 flex-col">
-				<ContentColumn
-					crumbs={["Settings", sectionInfo(section).title]}
-					width="settings"
-				>
+				<ContentColumn crumbs={["Settings"]} width="settings">
 					{page}
 				</ContentColumn>
 			</div>

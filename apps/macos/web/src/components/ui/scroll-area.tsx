@@ -10,6 +10,11 @@ export interface ScrollAreaProps
 	orientation?: "vertical" | "horizontal" | "both";
 	/** Fade the top 1.5 rem of content scrolling under a header row. */
 	fade?: boolean;
+	/**
+	 * A hairline at the top once the content has scrolled, the edge under a
+	 * dialog's header; nothing while the first line is in place.
+	 */
+	edge?: boolean;
 }
 
 const scrollbarClass = cn(
@@ -28,12 +33,18 @@ export function ScrollArea({
 	viewportClassName,
 	orientation = "vertical",
 	fade = false,
+	edge = false,
 	children,
 	...props
 }: ScrollAreaProps) {
 	return (
 		<BaseScrollArea.Root
-			className={cn("relative min-h-0 min-w-0 overflow-hidden", className)}
+			className={cn(
+				"relative min-h-0 min-w-0 overflow-hidden",
+				edge &&
+					"before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:z-10 before:hidden before:h-px before:bg-border before:content-[''] data-overflow-y-start:before:block",
+				className,
+			)}
 			{...props}
 		>
 			<BaseScrollArea.Viewport

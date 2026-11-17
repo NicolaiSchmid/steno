@@ -1,17 +1,17 @@
 import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "@/lib/cn";
-import { Card } from "./card";
 import { StatusIcon, type statusIconVariants } from "./status-icon";
 
 /**
- * A group of settings: a heading, a group card of rows divided by
- * hairlines, and a footnote sentence under the card. The Settings sections
- * are built from these alone. The section is a container (`@container/form`)
- * so rows switch from stacked to two columns by the card's own width: under
- * 520 px (onboarding's window) a row's buttons go under the description, so
- * the explanation keeps its width; a row whose control is only a status (a
- * badge, a value) keeps it at the trailing edge at every width.
+ * A group of settings, flat as Jamie lays them out: a heading with a
+ * hairline under it, the rows without a card or dividers, and a footnote
+ * sentence under them. The Settings sections are built from these alone.
+ * The section is a container (`@container/form`) so rows switch from
+ * stacked to two columns by its own width: under 520 px (onboarding's
+ * window) a row's buttons go under the description, so the explanation
+ * keeps its width; a row whose control is only a status (a badge, a value)
+ * keeps it at the trailing edge at every width.
  */
 export interface FormCardProps
 	extends Omit<ComponentProps<"section">, "title"> {
@@ -29,17 +29,17 @@ export function FormCard({
 }: FormCardProps) {
 	return (
 		<section
-			className={cn("@container/form flex flex-col gap-2.5", className)}
+			className={cn("@container/form flex flex-col", className)}
 			{...props}
 		>
 			{title ? (
-				<h3 className="m-0 flex min-h-7 select-none items-center px-4 text-body text-muted-foreground">
+				<h3 className="m-0 mb-1 select-none border-border border-b pb-2 text-headline">
 					{title}
 				</h3>
 			) : null}
-			<Card variant="group">{children}</Card>
+			<div className="flex flex-col">{children}</div>
 			{footer ? (
-				<p className="m-0 px-4 text-body text-muted-foreground">{footer}</p>
+				<p className="m-0 mt-1 text-body text-muted-foreground">{footer}</p>
 			) : null}
 		</section>
 	);
@@ -65,6 +65,11 @@ export interface FormRowProps
 	 * stays beside the label in a narrow card instead of going under it.
 	 */
 	statusOnly?: boolean;
+	/**
+	 * A fixed window (onboarding): the description in the meta size and
+	 * tighter spacing, so every row fits above the footer.
+	 */
+	compact?: boolean;
 }
 
 export function FormRow({
@@ -75,14 +80,23 @@ export function FormRow({
 	icon,
 	tone,
 	statusOnly = false,
+	compact = false,
 	children,
 	...props
 }: FormRowProps) {
 	return (
-		<div className={cn("flex flex-col gap-3 px-4 py-3", className)} {...props}>
+		<div
+			className={cn(
+				"flex flex-col",
+				compact ? "gap-2 py-2" : "gap-3 py-3",
+				className,
+			)}
+			{...props}
+		>
 			<div
 				className={cn(
-					"@min-[520px]/form:grid @min-[520px]/form:grid-cols-[minmax(0,1fr)_minmax(10rem,auto)] @min-[520px]/form:items-center @min-[520px]/form:gap-8 gap-3",
+					"@min-[520px]/form:grid @min-[520px]/form:grid-cols-[minmax(0,1fr)_minmax(10rem,auto)] @min-[520px]/form:items-center @min-[520px]/form:gap-8",
+					compact ? "gap-2" : "gap-3",
 					statusOnly
 						? "grid grid-cols-[minmax(0,1fr)_auto] items-start"
 						: "flex flex-col",
@@ -95,7 +109,12 @@ export function FormRow({
 							{label}
 						</span>
 						{description ? (
-							<span className="max-w-xl text-body text-muted-foreground">
+							<span
+								className={cn(
+									"max-w-xl text-muted-foreground",
+									compact ? "text-meta" : "text-body",
+								)}
+							>
 								{description}
 							</span>
 						) : null}

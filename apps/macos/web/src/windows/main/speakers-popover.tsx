@@ -77,12 +77,23 @@ function TriggerContent({
 				))}
 				{missing > 0 ? <Avatar name="Unnamed" size="md" unknown /> : null}
 			</AvatarStack>
-			<span className="truncate">
+			{/*
+			 * In a speakers row narrower than 18 rem the words go to the
+			 * screen reader and the eye gets the count, so the pill never
+			 * clips "2 need names" to a sliver.
+			 */}
+			<span className="@max-[18rem]/speakers:sr-only truncate">
 				{missing > 0
 					? needsLabel(missing)
 					: groups.named
 							.map(({ speaker }) => firstName(speaker.displayName))
 							.join(", ")}
+			</span>
+			<span
+				aria-hidden="true"
+				className="@max-[18rem]/speakers:inline hidden tabular-nums"
+			>
+				{missing > 0 ? missing : total}
 			</span>
 			<ChevronDownIcon aria-hidden="true" />
 		</>

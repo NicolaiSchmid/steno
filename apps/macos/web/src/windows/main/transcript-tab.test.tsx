@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { MeetingDetailSnapshot } from "@/bridge/contract";
 import { loadFixtureSnapshots } from "@/bridge/mock-transport";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
-import { TranscriptTab, transcriptText } from "./transcript-tab";
+import { TranscriptTab } from "./transcript-tab";
 
 const UNNAMED = "00000000-0000-0000-0000-000000000017";
 const NICOLAI = "00000000-0000-0000-0000-000000000014";
@@ -85,18 +85,16 @@ describe("TranscriptTab", () => {
 		]);
 	});
 
-	it("copies the transcript as one line per turn", async () => {
-		const user = userEvent.setup();
-		const writeText = vi.fn().mockResolvedValue(undefined);
-		Object.defineProperty(navigator, "clipboard", {
-			value: { writeText },
-			configurable: true,
-		});
+	it("leads each turn with the speaker in bold and the time beside it", async () => {
 		const harness = await createBridgeHarness();
 		const snapshot = await detail();
 		renderWithBridge(<TranscriptTab detail={snapshot} />, harness);
-		await user.click(screen.getByTestId("copy-transcript"));
-		expect(writeText).toHaveBeenCalledWith(transcriptText(snapshot.transcript));
-		expect(await screen.findByText("Copied")).toBeInTheDocument();
+		const [first] = snapshot.transcript;
+		if (!first) throw new Error("fixture has no turn");
+		const turn = screen.getByTestId(`turn-${first.id}`);
+		expect(turn).toHaveTextContent(
+			new RegExp(`^${first.speakerName}\\d{2}:\\d{2} – \\d{2}:\\d{2}`),
+		);
+		expect(screen.queryByTestId("copy-transcript")).toBeNull();
 	});
 });
