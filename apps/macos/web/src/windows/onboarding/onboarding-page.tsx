@@ -68,7 +68,7 @@ export function OnboardingPage({
 						</p>
 						{aside ? (
 							<p
-								className="m-0 text-faint text-xs"
+								className="m-0 text-muted-foreground text-xs"
 								data-testid="onboarding-retention"
 							>
 								{aside}

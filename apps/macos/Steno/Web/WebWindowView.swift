@@ -131,7 +131,7 @@ struct WebWindowView: NSViewRepresentable {
 /// this is the one value the host shares with the pages.
 enum WebCanvas {
   static let token = Theme.Token(
-    cssName: "web-background", dark: Theme.hex(0x0A0A0A), light: Theme.hex(0xFCFCFC))
+    cssName: "web-background", dark: Theme.hex(0x1A1A1A), light: Theme.hex(0xFFFFFF))
 
   /// Dynamic: AppKit resolves it per the window's effective appearance each
   /// time the window draws, so one assignment follows every appearance switch.

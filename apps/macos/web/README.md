@@ -85,6 +85,6 @@ so a focus ring's offset (`ring-offset-surface`) is what is around the
 control. The test can only see named colours: `pnpm lint:ui` rejects a
 `/NN` opacity on any colour token, in the kit too (name the veil in
 `theme.css`), and `opacity-*` on anything but a disabled state,
-`aria-hidden` decoration and a transition's 0 or 100. Pairs failing today
-are listed in `src/theme/known-failures.ts`; the test fails when one
-clears, so the list only shrinks.
+`aria-hidden` decoration and a transition's 0 or 100. The colours come
+from `src/theme/palette.ts` (dark is a ladder of steps from #121212 toward
+white), and the test fails when `theme.css` drifts from it.

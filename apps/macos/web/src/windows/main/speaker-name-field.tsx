@@ -196,7 +196,7 @@ export function SpeakerNameField({
 						{group.id !== "create" ? (
 							<div
 								aria-hidden="true"
-								className="px-2 pt-1.5 pb-0.5 font-medium text-2xs text-faint"
+								className="px-2 pt-1.5 pb-0.5 font-medium text-2xs text-muted-foreground"
 							>
 								{group.label}
 							</div>
@@ -226,7 +226,7 @@ export function SpeakerNameField({
 										{optionText(option)}
 									</span>
 									{option.detail ? (
-										<span className="shrink-0 text-faint text-xs">
+										<span className="shrink-0 text-muted-foreground text-xs">
 											{option.detail}
 										</span>
 									) : null}

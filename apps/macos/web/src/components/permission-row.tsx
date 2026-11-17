@@ -242,7 +242,7 @@ export function PermissionRow({
 					? "success"
 					: state === "denied"
 						? "warning"
-						: "faint"
+						: "muted"
 			}
 		/>
 	);

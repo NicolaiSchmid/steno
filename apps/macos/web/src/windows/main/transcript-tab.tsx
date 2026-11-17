@@ -107,7 +107,7 @@ export function TranscriptTab({
 							) : (
 								<span className="truncate">{turn.speakerName}</span>
 							)}
-							<span className="font-mono font-normal text-2xs text-faint tabular-nums">
+							<span className="font-mono font-normal text-2xs text-muted-foreground tabular-nums">
 								{format.range(turn.startSeconds, turn.endSeconds)}
 							</span>
 							{speaker ? (

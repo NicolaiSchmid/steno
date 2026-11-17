@@ -718,7 +718,7 @@ export function StoriesPage() {
 							label="Open Steno at login"
 						/>
 						<FormRow
-							control={<FormValue variant="faint">Not set up</FormValue>}
+							control={<FormValue>Not set up</FormValue>}
 							label={
 								<>
 									Summaries
