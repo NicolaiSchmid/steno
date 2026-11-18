@@ -77,6 +77,12 @@ ignore = [
   { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained, merged into zbus 6; Tauri's Linux plugins still need zbus 5" },
   { id = "RUSTSEC-2026-0371", reason = "zbus_names is unmaintained, merged into zbus 6; Tauri's Linux plugins still need zbus 5" },
   { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is unmaintained, merged into zbus 6; Tauri's Linux plugins still need zbus 5" },
+  # chrono and chrono-tz are unmaintained, not vulnerable, and every version
+  # is affected, so there is no upgrade. The way out is moving the dates and
+  # time zones (steno-core, steno-adapters, steno-audio, steno-bridge and the
+  # rest) to jiff, a change of its own; until then these are ignored.
+  { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained with no upgrade; moving to jiff is a separate change" },
+  { id = "RUSTSEC-2026-0555", reason = "chrono-tz is unmaintained with no upgrade; moving to jiff is a separate change" },
 ]
 
 [bans]
