@@ -55,7 +55,10 @@ pub use speech::{
     ClusterChunk, DiarizationResult, RawSegment, SpeakerCluster, SpeakerTurn, TimedWord, WordTiming,
 };
 pub use stage::{PipelineStage, StageRate};
-pub use stage_io::{CleanupInput, CleanupOutput, MeetingExport, SummaryInput, SummaryOutput};
+pub use stage_io::{
+    CleanupInput, CleanupOutput, MeetingExport, SummaryInput, SummaryOutput, TitleInput,
+    TitleOutput,
+};
 pub use summary::{SummaryBullet, SummaryDocument, SummarySection};
 pub use tasks::{Decision, MeetingTask, TaskPriority};
 pub use template::{SummaryTemplate, TemplateSection};

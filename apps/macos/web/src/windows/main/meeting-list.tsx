@@ -1,4 +1,9 @@
-import { AudioWaveformIcon, SearchIcon, Trash2Icon } from "lucide-react";
+import {
+	AudioWaveformIcon,
+	SearchIcon,
+	SparklesIcon,
+	Trash2Icon,
+} from "lucide-react";
 import {
 	type ChangeEvent,
 	type KeyboardEvent,
@@ -18,6 +23,7 @@ import {
 	ContextMenu,
 	ContextMenuItem,
 	ContextMenuPopup,
+	ContextMenuSeparator,
 	ContextMenuTrigger,
 	EmptyState,
 	HeaderRow,
@@ -37,6 +43,7 @@ import { deleteMeeting } from "./delete-meeting";
 import { firstSentence, format } from "./format";
 import { NarrowLayoutContext } from "./narrow-layout";
 import { isParked } from "./processing-card";
+import { regenerateTitle } from "./regenerate-title";
 
 export const QUERY_DEBOUNCE_MS = 200;
 
@@ -406,6 +413,15 @@ function MeetingRowView({
 				</button>
 			</ContextMenuTrigger>
 			<ContextMenuPopup>
+				<ContextMenuItem
+					data-testid="regenerate-title"
+					disabled={meeting.state !== "ready"}
+					icon={<SparklesIcon />}
+					onClick={() => regenerateTitle(client, meeting.id)}
+				>
+					Regenerate title
+				</ContextMenuItem>
+				<ContextMenuSeparator />
 				<ContextMenuItem
 					icon={<Trash2Icon />}
 					onClick={() => deleteMeeting(client, meeting.id)}

@@ -10,7 +10,8 @@ use steno_core::{
     BoundaryResult, LanguageModel, LanguageTag, LlmMessage, LlmRequest, LlmResponseFormat, LlmRole,
     LlmUsage, MeetingSummarizer, MeetingTask, Person, Speaker, SpeakerAssignment,
     SpeakerNameSuggestion, SummaryBullet, SummaryDocument, SummaryInput, SummaryOutput,
-    SummarySection, SummaryTemplate, TaskPriority, async_trait, derived_uuid,
+    SummarySection, SummaryTemplate, TaskPriority, TitleInput, TitleOutput, async_trait,
+    derived_uuid,
 };
 use uuid::Uuid;
 
@@ -55,6 +56,12 @@ pub struct AnalysisDraft {
     pub decisions: Vec<String>,
     pub tasks: Vec<DraftTask>,
     pub speaker_names: Vec<DraftSpeakerName>,
+}
+
+/// The "Regenerate title" answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleDraft {
+    pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -744,6 +751,64 @@ impl<Tz: TimeZone> SummaryPromptBuilder<Tz> {
             .to_string()
     }
 
+    /// The "Regenerate title" answer schema.
+    #[must_use]
+    pub fn title_schema() -> JsonSchema {
+        JsonSchema::object(vec![(
+            "title",
+            JsonSchema::string().described("under 80 characters, \"Topic: Subtopic\" when natural"),
+        )])
+    }
+
+    /// "Regenerate title": one short call over the stored summary and
+    /// decisions, never the transcript.
+    #[must_use]
+    pub fn build_title(input: &TitleInput) -> LlmRequest {
+        let language = OutputLanguage::resolve(input.meeting.language.as_ref());
+        let language_name = OutputLanguage::prompt_name(&language);
+        let system = [
+            "You name meetings. You receive the summary of one meeting and answer with a new title for it as JSON.".to_owned(),
+            format!("Output language: {language_name}. Keep product names, code and terms from the summary as written."),
+            format!("Rules:\n- The title is under 80 characters, \"Topic: Subtopic\" when that reads naturally, in {language_name}.\n- Name what the meeting was about, not that it was a meeting; no date, no quotes, no trailing period.\n- It must differ from the current title unless that one is already the best fit.\n- Only what the summary says. Never invent facts, names, numbers or dates."),
+        ]
+        .join("\n\n");
+        let mut lines = vec![
+            format!("Current title: {}", input.meeting.title),
+            String::new(),
+        ];
+        for section in &input.summary.sections {
+            if section.bullets.is_empty() {
+                continue;
+            }
+            lines.push(format!("## {}", section.heading));
+            for bullet in &section.bullets {
+                if bullet.lead.is_empty() {
+                    lines.push(format!("- {}", bullet.text));
+                } else {
+                    lines.push(format!("- {}: {}", bullet.lead, bullet.text));
+                }
+            }
+            lines.push(String::new());
+        }
+        if !input.decisions.is_empty() {
+            lines.push("## Decisions".to_owned());
+            for decision in &input.decisions {
+                lines.push(format!("- {decision}"));
+            }
+        }
+        Self::request(
+            system,
+            lines.join("\n").trim_end().to_owned(),
+            &Self::title_schema(),
+            "meeting_title",
+            "title",
+            Some(Self::TITLE_OUTPUT_TOKENS),
+        )
+    }
+
+    /// Room for a short JSON object even on a model that thinks first.
+    pub const TITLE_OUTPUT_TOKENS: i64 = 1024;
+
     fn request(
         system: String,
         user: String,
@@ -960,5 +1025,20 @@ where
 {
     async fn summarize(&self, input: &SummaryInput) -> BoundaryResult<SummaryOutput> {
         self.summarize_input(input).await
+    }
+
+    async fn retitle(&self, input: &TitleInput) -> BoundaryResult<TitleOutput> {
+        let request = SummaryPromptBuilder::<Tz>::build_title(input);
+        let (draft, usage) = self
+            .complete::<TitleDraft>(&request, &SummaryPromptBuilder::<Tz>::title_schema())
+            .await?;
+        let title = draft.title.trim().trim_end_matches('.').trim();
+        if title.is_empty() {
+            return Err("the model answered with an empty title".into());
+        }
+        Ok(TitleOutput {
+            title: title.to_owned(),
+            usage,
+        })
     }
 }

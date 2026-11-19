@@ -22,8 +22,8 @@ use steno_core::{
     MeetingOperation, MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer,
     Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
     SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput,
-    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, VoiceStrength,
-    derived_uuid,
+    SummaryTemplate, TimeRange, TitleInput, TitleOrigin, TranscriptCleaner, TranscriptSegment,
+    VoiceStrength, derived_uuid,
     paths::{file_url, file_url_path},
     protocols::{BoxError, DEFAULT_MATCH_MARGIN},
     room_speaker_id,
@@ -2262,6 +2262,125 @@ impl ProcessingPipeline {
             drop(admitted);
             pipeline.reporting(meeting_id, MeetingOperation::SummaryRerun, result)
         }))
+    }
+
+    /// "Regenerate title": a new title from the stored summary, whatever
+    /// named the meeting before (the user, the calendar, the summary), then
+    /// deliver, so the export carries it. The summary stays. A failure
+    /// leaves the meeting as it was; without a summarizer or a summary the
+    /// call fails.
+    pub async fn regenerate_title(&self, meeting_id: Uuid) -> Result<()> {
+        self.claim_regenerate_title(meeting_id)?.await
+    }
+
+    /// The synchronous half of [`regenerate_title`](Self::regenerate_title),
+    /// as [`claim_rerun_summary`](Self::claim_rerun_summary) is of the re-run.
+    pub fn claim_regenerate_title(&self, meeting_id: Uuid) -> Result<Operation> {
+        let meeting = required(
+            PipelineStage::Summarize,
+            self.store().meeting(meeting_id),
+            || format!("meeting {meeting_id} not found"),
+        )?;
+        let Some(summarizer) = self.inner.dependencies.summarizer.clone() else {
+            return Err(PipelineFailure::new(
+                PipelineStage::Summarize,
+                "no LLM endpoint is configured",
+            ));
+        };
+        if meeting.state != MeetingState::Ready || meeting.summary.is_none() {
+            return Err(PipelineFailure::new(
+                PipelineStage::Summarize,
+                "the meeting has no summary to name it from",
+            ));
+        }
+        let admitted = self.admit(meeting_id, PipelineStage::Summarize)?;
+        let pipeline = self.clone();
+        Ok(Box::pin(async move {
+            pipeline.until_jobs_may_start().await;
+            let result = unless_it_panics(
+                || PipelineStage::Summarize,
+                pipeline.retitle(meeting_id, summarizer),
+            )
+            .await;
+            drop(admitted);
+            pipeline.reporting(meeting_id, MeetingOperation::TitleRegeneration, result)
+        }))
+    }
+
+    async fn retitle(
+        &self,
+        meeting_id: Uuid,
+        summarizer: Arc<dyn MeetingSummarizer>,
+    ) -> Result<()> {
+        let (export, settings) = attributing(
+            PipelineStage::Summarize,
+            self.store()
+                .reading(move |store| Ok((store.export(meeting_id)?, store.settings()?)))
+                .await,
+        )?;
+        let meeting = export.meeting.clone();
+        let Some(summary) = meeting.summary.clone() else {
+            return Err(PipelineFailure::new(
+                PipelineStage::Summarize,
+                "the meeting has no summary to name it from",
+            ));
+        };
+        let lanes = export
+            .audio
+            .as_ref()
+            .map(|a| a.lanes.clone())
+            .unwrap_or_default();
+        self.begin_run(
+            &meeting,
+            &lanes,
+            Some(0),
+            vec![PipelineStage::Summarize, PipelineStage::Deliver],
+            &settings,
+        )
+        .await?;
+        let input = TitleInput {
+            meeting,
+            summary,
+            decisions: export.decisions.into_iter().map(|d| d.text).collect(),
+        };
+        let store = self.store();
+        let now = self.now();
+        self.run(PipelineStage::Summarize, 0, meeting_id, async {
+            let output = attributing(PipelineStage::Summarize, summarizer.retitle(&input).await)?;
+            attributing(
+                PipelineStage::Summarize,
+                store
+                    .writing(move |store| {
+                        store.update_meeting(meeting_id, now, |meeting| {
+                            meeting.title = output.title;
+                            meeting.title_origin = TitleOrigin::Summary;
+                            meeting.llm_usage = Some(
+                                meeting.llm_usage.unwrap_or(LlmUsage {
+                                    prompt_tokens: 0,
+                                    completion_tokens: 0,
+                                    requests: 0,
+                                }) + output.usage,
+                            );
+                            Ok(())
+                        })?;
+                        Ok(())
+                    })
+                    .await,
+            )
+        })
+        .await?;
+        // An exit before `deliver` leaves `pending` rows for the next launch.
+        let dispatcher = self.inner.dependencies.dispatcher.clone();
+        let _ = self
+            .store()
+            .writing(move |_| {
+                dispatcher.mark_pending(meeting_id);
+                Ok(())
+            })
+            .await;
+        self.deliver(meeting_id).await;
+        self.stamp_deferred_retention(meeting_id, Stamp::Automatic)
+            .await
     }
 
     async fn resummarize(&self, meeting: Meeting, template_id: &str) -> Result<()> {

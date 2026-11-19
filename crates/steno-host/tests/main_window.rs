@@ -253,6 +253,50 @@ fn selecting_an_unlisted_meeting_waits_for_its_row() {
 }
 
 #[test]
+fn regenerate_title_needs_summaries_and_a_finished_meeting() {
+    let harness = Harness::builder().seed(populate_sample).build();
+    let off = harness
+        .host
+        .meetings_regenerate_title(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap_err();
+    assert_eq!(off.code, BridgeErrorCode::Failed);
+    assert_eq!(
+        off.message,
+        "Set up summaries in Settings to regenerate titles."
+    );
+
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            configure_llm(store, "qwen3");
+            let mut processing = sample_meeting();
+            processing.id = uuid(0x77);
+            processing.state = MeetingState::Processing;
+            store.save_meeting(&processing).unwrap();
+        })
+        .build();
+    let busy = harness
+        .host
+        .meetings_regenerate_title(MeetingIdParams {
+            meeting_id: uuid(0x77),
+        })
+        .unwrap_err();
+    assert_eq!(busy.message, "This meeting is still being processed.");
+    harness
+        .host
+        .meetings_regenerate_title(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap();
+    assert_eq!(
+        *harness.fakes.pipeline.title_regenerations.lock().unwrap(),
+        vec![uuid(MEETING)]
+    );
+}
+
+#[test]
 fn delete_asks_first_and_refuses_a_busy_meeting() {
     let harness = Harness::builder()
         .confirm(false)

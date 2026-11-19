@@ -1933,6 +1933,58 @@ impl BridgeHost for Host {
         Ok(())
     }
 
+    /// "Regenerate title" on any listed meeting, selected or not: refused
+    /// in the user's words while the meeting has no summary or summaries are
+    /// off, else the pipeline names it again from its summary in the
+    /// background. A later failure goes on the detail's error line
+    /// (`MeetingEvent::OperationFailed`).
+    fn meetings_regenerate_title(&self, params: MeetingIdParams) -> Outcome<()> {
+        {
+            let inner = self.lock();
+            let meeting = inner
+                .list
+                .all
+                .iter()
+                .find(|meeting| meeting.id == params.meeting_id)
+                .ok_or_else(no_such_meeting)?;
+            if meeting.state != steno_core::MeetingState::Ready {
+                return Err(BridgeError::failed(
+                    "This meeting is still being processed.",
+                ));
+            }
+            if meeting.summary.is_none() {
+                return Err(BridgeError::failed(
+                    "This meeting has no summary to take a title from.",
+                ));
+            }
+            let settings = inner.app.stored_settings.as_ref();
+            if !settings.is_some_and(crate::setup::llm_configured) {
+                return Err(BridgeError::failed(
+                    "Set up summaries in Settings to regenerate titles.",
+                ));
+            }
+            let withheld = self
+                .shared
+                .services
+                .withheld_api_key
+                .as_ref()
+                .zip(settings)
+                .is_some_and(|(withheld, settings)| withheld.withheld(settings));
+            if withheld {
+                return Err(BridgeError::failed(
+                    "Steno cannot read the API key for summaries, so it cannot regenerate the title.",
+                ));
+            }
+        }
+        self.shared
+            .services
+            .pipeline
+            .regenerate_title(params.meeting_id)
+            .map_err(|error| {
+                BridgeError::failed(format!("The title could not be regenerated: {error}"))
+            })
+    }
+
     fn meetings_delete(&self, params: MeetingIdParams) -> Outcome<ConfirmReply> {
         let recorder_idle = self.shared.services.recorder.status().state == RecordingState::Idle;
         let (prompt, recording) = {

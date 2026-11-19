@@ -78,6 +78,7 @@ pub enum MeetingEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MeetingOperation {
     SummaryRerun,
+    TitleRegeneration,
     Reexport,
 }
 
@@ -87,6 +88,7 @@ impl MeetingOperation {
     pub fn label(self) -> &'static str {
         match self {
             MeetingOperation::SummaryRerun => "Summary re-run",
+            MeetingOperation::TitleRegeneration => "Title regeneration",
             MeetingOperation::Reexport => "Re-export",
         }
     }

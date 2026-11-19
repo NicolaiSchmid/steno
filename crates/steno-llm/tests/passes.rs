@@ -1179,3 +1179,49 @@ fn every_prompt_matches_its_golden() {
     );
     assert_golden(&render(&repair), "prompts/summary-repair.txt");
 }
+
+/// "Regenerate title" sends the stored summary, never the transcript, and
+/// keeps the answer's words without a trailing period.
+#[tokio::test]
+async fn retitle_names_the_meeting_from_its_summary() {
+    let server = StubChatServer::start().await.unwrap();
+    server.enqueue([scripts.json(
+        &steno_llm::TitleDraft {
+            title: " Budget: Q1 plan. ".to_owned(),
+        },
+        Some(usage(300, 20)),
+    )]);
+    let mut meeting = default_input().meeting;
+    meeting.title = "Meeting".to_owned();
+    let input = steno_core::TitleInput {
+        meeting,
+        summary: steno_core::SummaryDocument {
+            template_id: "default".to_owned(),
+            language: None,
+            sections: vec![steno_core::SummarySection {
+                id: "overview".to_owned(),
+                heading: "Overview".to_owned(),
+                bullets: vec![SummaryBullet {
+                    lead: "Budget".to_owned(),
+                    text: "The team planned the Q1 budget.".to_owned(),
+                }],
+            }],
+        },
+        decisions: vec!["Hiring pauses until March.".to_owned()],
+    };
+    let output = summarizer(&server, 32_000).retitle(&input).await.unwrap();
+    assert_eq!(output.title, "Budget: Q1 plan");
+    assert_eq!(output.usage, usage(300, 20));
+    assert_eq!(purposes(&server), ["title"]);
+    let chat = server.requests()[0].chat.clone().unwrap();
+    let user = &chat
+        .messages
+        .iter()
+        .find(|m| m.role == "user")
+        .unwrap()
+        .content;
+    assert_eq!(
+        user,
+        "Current title: Meeting\n\n## Overview\n- Budget: The team planned the Q1 budget.\n\n## Decisions\n- Hiring pauses until March."
+    );
+}

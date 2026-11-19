@@ -267,6 +267,9 @@ pub struct LeftRecording {
 /// thread, never from inside these methods.
 pub trait Pipeline: Send + Sync {
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()>;
+    /// "Regenerate title": a new title from the stored summary, then
+    /// deliver; the summary stays.
+    fn regenerate_title(&self, meeting_id: Uuid) -> BoundaryResult<()>;
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()>;
     /// "Process again": saves the meeting queued and starts its run from
     /// `decode`, returning once it started. Refused without a change for

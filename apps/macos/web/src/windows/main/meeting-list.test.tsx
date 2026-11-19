@@ -103,6 +103,36 @@ describe("MeetingList", () => {
 		);
 	});
 
+	it("regenerates a ready meeting's title from its context menu", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness();
+		renderWithBridge(<MeetingList />, harness);
+		fireEvent.contextMenu(screen.getByTestId(`meeting-${FIRST}`), {
+			clientX: 40,
+			clientY: 40,
+		});
+		await user.click(
+			await screen.findByRole("menuitem", { name: "Regenerate title" }),
+		);
+		await vi.waitFor(() =>
+			expect(harness.transport.calls).toEqual([
+				{ method: "meetings.regenerateTitle", params: { meetingID: FIRST } },
+			]),
+		);
+	});
+
+	it("offers no title for a meeting that is not ready", async () => {
+		const harness = await createBridgeHarness();
+		renderWithBridge(<MeetingList />, harness);
+		fireEvent.contextMenu(screen.getByTestId(`meeting-${FAILED}`), {
+			clientX: 40,
+			clientY: 40,
+		});
+		expect(
+			await screen.findByRole("menuitem", { name: "Regenerate title" }),
+		).toHaveAttribute("aria-disabled", "true");
+	});
+
 	it("deletes the selected meeting with the Delete key", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness();

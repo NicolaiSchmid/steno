@@ -761,6 +761,46 @@ async fn without_an_llm_the_meeting_is_ready_with_no_summary() {
     assert!(error.reason.contains("no LLM endpoint"));
 }
 
+/// "Regenerate title" names the meeting again from its stored summary,
+/// over a typed title too, keeps the summary and adds the call's usage.
+#[tokio::test(flavor = "multi_thread")]
+async fn regenerate_title_replaces_any_title_and_keeps_the_summary() {
+    let world = world(true, None, AudioRetention::KeepForever);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    world.store.rename(meeting.id, "Typed", world.now).unwrap();
+    let before = world.store.meeting(meeting.id).unwrap().unwrap();
+
+    world.pipeline.regenerate_title(meeting.id).await.unwrap();
+
+    let after = world.store.meeting(meeting.id).unwrap().unwrap();
+    assert_eq!(after.title, "Retitled Typed");
+    assert_eq!(after.title_origin, steno_core::TitleOrigin::Summary);
+    assert_eq!(after.summary, before.summary);
+    assert_eq!(after.state, MeetingState::Ready);
+    let (before_usage, after_usage) = (before.llm_usage.unwrap(), after.llm_usage.unwrap());
+    assert_eq!(after_usage.requests, before_usage.requests + 1);
+    assert_eq!(world.pipeline.in_flight(), Vec::<Uuid>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn regenerate_title_is_refused_without_a_summary() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    let error = world
+        .pipeline
+        .regenerate_title(meeting.id)
+        .await
+        .unwrap_err();
+    assert_eq!(error.stage, PipelineStage::Summarize);
+    assert!(error.reason.contains("no LLM endpoint"));
+}
+
 /// A cleaner that first runs `meddle` with the store, as the user can
 /// while the cleanup waits, then marks every segment cleaned.
 struct MeddlingCleaner {
