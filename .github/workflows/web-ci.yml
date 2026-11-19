@@ -30,7 +30,10 @@ defaults:
 jobs:
   web:
     name: Check, build, screens
-    runs-on: ubicloud-standard-8
+    # Install and build take seconds; the time goes to Vitest and the
+    # Playwright screens (fullyParallel, one worker per two cores), so four
+    # cores rather than two.
+    runs-on: ubicloud-standard-4
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4

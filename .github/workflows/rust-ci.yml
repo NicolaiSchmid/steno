@@ -70,13 +70,14 @@ name: Rust CI
 # device-change reports, the teardown, and the allocation count on
 # PipeWire's own data-loop thread.
 #
-# The `tsan` job runs the audio ring tests under ThreadSanitizer: the
-# two-thread accounting test in `crates/steno-audio/tests/ring.rs` is what
-# catches a weakened memory ordering on the ring indices, and only a
-# sanitizer sees that on x86. `tests/split_streams.rs` runs there too: its
-# two-thread test drives the WASAPI backend's follower staging ring. It
-# needs nightly and `-Zbuild-std`, so it is its own job and is not a
-# required check: a nightly breakage must not block the workspace jobs.
+# The `tsan` job (ThreadSanitizer over the audio ring tests) is its own
+# workflow, rust-tsan.yml, gated on steno-audio's paths.
+#
+# Linux runs the workspace tests with cargo-nextest (one process per test,
+# parallel across test binaries) and the doctests with `cargo test --doc`,
+# which nextest does not run; Windows and macOS keep `cargo test`. Every
+# test that needs a serial run (the PipeWire live tests, the handover
+# network and credential tests) keeps its own step below.
 
 on:
   pull_request:
@@ -138,7 +139,7 @@ jobs:
       matrix:
         include:
           - name: linux
-            os: ubicloud-standard-8
+            os: ubicloud-standard-4
           - name: windows
             os: windows-latest
           # `MACOS_RUNS_ON` is a JSON label list for the Forge runners, the
@@ -222,8 +223,22 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # `--no-fail-fast`: every crate's tests run and report even when an
       # earlier crate fails, so one red crate does not hide the others.
+      # Linux runs them under nextest, which runs the test binaries in
+      # parallel instead of one after the other; nextest builds with
+      # `cargo test --no-run`, so the steps below rebuild no more than before.
       - name: Test
+        if: matrix.name != 'linux'
         run: cargo test --workspace --locked --no-fail-fast
+      - uses: taiki-e/install-action@v2
+        if: matrix.name == 'linux'
+        with:
+          tool: cargo-nextest
+      - name: Test (nextest)
+        if: matrix.name == 'linux'
+        run: cargo nextest run --workspace --locked --no-fail-fast
+      - name: Doctests
+        if: matrix.name == 'linux'
+        run: cargo test --workspace --doc --locked --no-fail-fast
       - name: Test the core fakes
         run: cargo test -p steno-core --features testing --locked
       # The shell answers from the real host by default since WP6b; its
@@ -481,26 +496,3 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check on the minimum supported Rust
         run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-targets --locked
-
-  tsan:
-    name: tsan
-    runs-on: ubicloud-standard-8
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src
-      # steno-audio links libpipewire on Linux and generates its bindings
-      # with libclang at build time.
-      - name: PipeWire headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Ring tests under ThreadSanitizer
-        env:
-          RUSTFLAGS: -Zsanitizer=thread
-        run: cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --locked -p steno-audio --test ring --test split_streams

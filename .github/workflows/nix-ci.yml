@@ -53,12 +53,26 @@ permissions:
 jobs:
   linux:
     name: Flake (x86_64-linux package and module)
-    runs-on: ubicloud-standard-16
+    runs-on: ubicloud-standard-8
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
       - uses: cachix/install-nix-action@v31
+
+      # The Nix store from main's last run, so the Tauri CLI (an
+      # `overrideAttrs` in nix/package.nix, which cache.nixos.org does not
+      # have; about three minutes to build) and the downloaded build inputs
+      # come back instead of being rebuilt and fetched. Keyed on what the
+      # CLI and the inputs depend on; saved from main only, as rust-ci.yml's
+      # rust-cache is. The CLI is a GC root (step below), so the store's
+      # trim before the save keeps it.
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'nix/**') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          save: ${{ github.ref == 'refs/heads/main' }}
+          gc-max-store-size-linux: 4G
 
       - name: Evaluate every output
         run: nix flake check --no-build --all-systems
@@ -67,6 +81,9 @@ jobs:
       # when the web UI's lockfile moved without it.
       - name: Web UI dependencies against their hash
         run: nix build --no-link -L .#steno.pnpmDeps
+
+      - name: Tauri CLI, kept as a GC root for the store cache
+        run: nix build -L --out-link "$RUNNER_TEMP/tauri-cli" .#steno.tauriCli
 
       - name: Package and checks
         run: nix build --no-link -L .#checks.x86_64-linux.package .#checks.x86_64-linux.module

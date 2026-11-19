@@ -1,0 +1,61 @@
+name: Rust TSan
+
+# The audio ring tests under ThreadSanitizer: the two-thread accounting test
+# in `crates/steno-audio/tests/ring.rs` is what catches a weakened memory
+# ordering on the ring indices, and only a sanitizer sees that on x86.
+# `tests/split_streams.rs` runs here too: its two-thread test drives the
+# WASAPI backend's follower staging ring. It needs nightly and
+# `-Zbuild-std`, so it is not a required check: a nightly breakage must not
+# block the workspace jobs in rust-ci.yml.
+#
+# Gated on what it tests (steno-audio), the lockfile, the workspace
+# manifest and the toolchain pin, unlike rust-ci.yml's wider paths: most
+# Rust changes cannot move the ring's memory ordering.
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain*'
+      - 'crates/steno-audio/**'
+      - '.github/workflows/rust-tsan.yml'
+  push:
+    branches: ['main']
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain*'
+      - 'crates/steno-audio/**'
+      - '.github/workflows/rust-tsan.yml'
+
+concurrency:
+  group: rust-tsan-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tsan:
+    name: tsan
+    runs-on: ubicloud-standard-8
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      # steno-audio links libpipewire on Linux and generates its bindings
+      # with libclang at build time.
+      - name: PipeWire headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Ring tests under ThreadSanitizer
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+        run: cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --locked -p steno-audio --test ring --test split_streams
