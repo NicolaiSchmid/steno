@@ -469,6 +469,7 @@ impl Drop for FakeStartHold {
 #[derive(Debug, Default)]
 pub struct FakePipeline {
     pub summary_reruns: Mutex<Vec<(Uuid, String)>>,
+    pub title_regenerations: Mutex<Vec<Uuid>>,
     pub redeliveries: Mutex<Vec<Uuid>>,
     /// Every meeting `process_again` was asked for, refused or not.
     pub processed_again: Mutex<Vec<Uuid>>,
@@ -501,6 +502,11 @@ impl FakePipeline {
 impl Pipeline for FakePipeline {
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()> {
         lock(&self.summary_reruns).push((meeting_id, template_id.to_owned()));
+        self.outcome()
+    }
+
+    fn regenerate_title(&self, meeting_id: Uuid) -> BoundaryResult<()> {
+        lock(&self.title_regenerations).push(meeting_id);
         self.outcome()
     }
 

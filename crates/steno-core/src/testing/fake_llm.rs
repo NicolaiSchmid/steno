@@ -10,8 +10,8 @@ use super::{CallLog, FakeFailure, lock};
 use crate::{
     BoundaryResult, BoxError, CleanupInput, CleanupOutput, LanguageModel, LlmRequest, LlmResponse,
     LlmUsage, MeetingSummarizer, MeetingTask, SpeakerNameSuggestion, SummaryBullet,
-    SummaryDocument, SummaryInput, SummaryOutput, SummarySection, TaskPriority, TranscriptCleaner,
-    derived_uuid,
+    SummaryDocument, SummaryInput, SummaryOutput, SummarySection, TaskPriority, TitleInput,
+    TitleOutput, TranscriptCleaner, derived_uuid,
 };
 
 /// The queue of canned responses ran dry.
@@ -98,6 +98,8 @@ pub struct FakeSummarizer {
     pub failure: Option<String>,
     /// Template ids of every `summarize` call.
     pub summaries: CallLog<String>,
+    /// The current title of every `retitle` call.
+    pub titles: CallLog<String>,
 }
 
 impl Default for FakeSummarizer {
@@ -111,6 +113,7 @@ impl Default for FakeSummarizer {
             },
             failure: None,
             summaries: CallLog::new(),
+            titles: CallLog::new(),
         }
     }
 }
@@ -183,5 +186,14 @@ impl MeetingSummarizer for FakeSummarizer {
             return Ok(canned.clone());
         }
         Ok(Self::output(input, self.usage))
+    }
+
+    async fn retitle(&self, input: &TitleInput) -> BoundaryResult<TitleOutput> {
+        self.titles.record(input.meeting.title.clone());
+        FakeFailure::check(self.failure.as_ref())?;
+        Ok(TitleOutput {
+            title: format!("Retitled {}", input.meeting.title),
+            usage: self.usage,
+        })
     }
 }

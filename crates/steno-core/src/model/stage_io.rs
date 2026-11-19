@@ -40,6 +40,22 @@ pub struct SummaryInput {
     pub template: SummaryTemplate,
 }
 
+/// Input of "Regenerate title": the stored summary and decisions of one
+/// meeting, so a new title costs one short call and leaves the summary alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TitleInput {
+    pub meeting: Meeting,
+    pub summary: SummaryDocument,
+    pub decisions: Vec<String>,
+}
+
+/// The model's new title, trimmed and never empty, with what it cost.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TitleOutput {
+    pub title: String,
+    pub usage: LlmUsage,
+}
+
 /// Output of the summarize stage, in the meeting language.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -46,7 +46,7 @@ pub use retry::RetryPolicy;
 pub use schema::JsonSchema;
 pub use summary::{
     AnalysisDraft, ChunkNotes, DraftSpeakerName, DraftTask, LlmMeetingSummarizer,
-    SummaryPromptBuilder,
+    SummaryPromptBuilder, TitleDraft,
 };
 pub use transport::{Clock, LlmClientEvent, Observer, SystemClock};
 

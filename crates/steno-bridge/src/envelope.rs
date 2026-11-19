@@ -34,6 +34,10 @@ string_enum! {
         MeetingsSetQuery = "meetings.setQuery",
         MeetingsSelect = "meetings.select",
         MeetingsDelete = "meetings.delete",
+        /// "Regenerate title": a new title for the meeting from its stored
+        /// summary, from the list's context menu or the detail's menu. A
+        /// refusal is the reply's error.
+        MeetingsRegenerateTitle = "meetings.regenerateTitle",
 
         MeetingSetTab = "meeting.setTab",
         MeetingSetTags = "meeting.setTags",

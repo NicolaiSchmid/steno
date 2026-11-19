@@ -130,6 +130,7 @@ bridge_host! {
     MeetingsSetQuery => fn meetings_set_query(params: SetQueryParams) -> ();
     MeetingsSelect => fn meetings_select(params: MeetingIdParams) -> ();
     MeetingsDelete => fn meetings_delete(params: MeetingIdParams) -> ConfirmReply;
+    MeetingsRegenerateTitle => fn meetings_regenerate_title(params: MeetingIdParams) -> ();
 
     MeetingSetTab => fn meeting_set_tab(params: SetTabParams) -> ();
     MeetingSetTags => fn meeting_set_tags(params: SetTagsParams) -> ();

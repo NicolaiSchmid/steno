@@ -267,6 +267,34 @@ describe("MeetingDetail", () => {
 		).toHaveTextContent("Set up summaries");
 	});
 
+	it("regenerates the title from the actions menu", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness();
+		renderWithBridge(<MeetingDetail initialMenuOpen />, harness);
+		await user.click(
+			await screen.findByRole("menuitem", { name: "Regenerate title" }),
+		);
+		await vi.waitFor(() =>
+			expect(callsTo(harness.transport, "meetings.regenerateTitle")).toEqual([
+				{ method: "meetings.regenerateTitle", params: { meetingID: FIRST } },
+			]),
+		);
+	});
+
+	it("offers no new title without a summary", async () => {
+		const detail = await fixtureDetail();
+		const harness = await createBridgeHarness("", {
+			"meeting.detail": {
+				...detail,
+				summary: [],
+			} satisfies MeetingDetailSnapshot,
+		});
+		renderWithBridge(<MeetingDetail initialMenuOpen />, harness);
+		expect(
+			await screen.findByRole("menuitem", { name: "Regenerate title" }),
+		).toHaveAttribute("aria-disabled", "true");
+	});
+
 	it("keeps Re-run summary for when the host allows it", async () => {
 		const detail = await fixtureDetail();
 		const harness = await createBridgeHarness("", {

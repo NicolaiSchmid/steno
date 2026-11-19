@@ -360,6 +360,12 @@ impl Pipeline for HostPipeline {
             .claim_and_spawn(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))?)
     }
 
+    fn regenerate_title(&self, meeting_id: Uuid) -> BoundaryResult<()> {
+        Ok(self
+            .pipeline
+            .claim_and_spawn(|pipeline| pipeline.claim_regenerate_title(meeting_id))?)
+    }
+
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()> {
         Ok(self
             .pipeline

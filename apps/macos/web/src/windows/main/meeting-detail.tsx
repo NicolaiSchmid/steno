@@ -57,6 +57,7 @@ import { MeetingsToggle, NarrowLayoutContext } from "./narrow-layout";
 import { NotesTab } from "./notes-tab";
 import { ProcessingCard } from "./processing-card";
 import { RecorderBar } from "./recorder-notices";
+import { regenerateTitle } from "./regenerate-title";
 import { DIARIZE_STAGE } from "./speaker-names";
 import { SpeakersPopover } from "./speakers-popover";
 import { SummaryTab } from "./summary-tab";
@@ -675,6 +676,19 @@ function DetailBody({
 						onClick={rerun}
 					>
 						Re-run summary
+					</MenuItem>
+					<MenuItem
+						data-testid="regenerate-title"
+						disabled={
+							!detail.canRerunSummary ||
+							detail.isBusy ||
+							detail.state !== "ready" ||
+							detail.summary.length === 0
+						}
+						icon={<SparklesIcon />}
+						onClick={() => regenerateTitle(client, detail.id)}
+					>
+						Regenerate title
 					</MenuItem>
 					<MenuSeparator />
 					<MenuItem

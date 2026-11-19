@@ -525,6 +525,15 @@
 		font-size: 16px;
 	}
 
+	/* No rubber-band past either end of a window: the canvas behind the page
+	   would show through. Vertical only: the horizontal axis carries the
+	   swipe back and forward. Inner scrollers keep their own
+	   `overscroll-contain`. */
+	html,
+	body {
+		overscroll-behavior-y: none;
+	}
+
 	/* A floating panel's document is its pill and nothing else: the shell
 	   sizes the window from the pill's report, so there is nothing to scroll
 	   to and no scrollbar may appear for a rounding remainder. */
@@ -541,7 +550,6 @@
 		font-size: var(--text-body);
 		line-height: var(--text-body--line-height);
 		-webkit-font-smoothing: antialiased;
-		overscroll-behavior: none;
 	}
 
 	button {
