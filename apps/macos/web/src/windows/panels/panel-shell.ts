@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import { type RefObject, useEffect } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+	type MouseEvent,
+	type PointerEvent,
+	type RefObject,
+	useEffect,
+	useRef,
+} from "react";
 import { hasTauriBridge } from "@/bridge/tauri-transport";
 
 /**
@@ -89,4 +96,68 @@ export function useReportSize(
 		observer.observe(element);
 		return () => observer.disconnect();
 	}, [ref, shell]);
+}
+
+/** Moves the panel's window with the pointer; a no-op outside the shell. */
+export function startPanelDrag(target: Window = window): void {
+	if (!hasTauriBridge(target)) {
+		return;
+	}
+	getCurrentWindow()
+		.startDragging()
+		.catch((cause: unknown) => {
+			console.error("panel: drag failed", cause);
+		});
+}
+
+/** How far, in CSS pixels, a press travels before it is a drag. */
+export const DRAG_THRESHOLD = 4;
+
+/**
+ * A button that also drags its panel: a press that travels past
+ * `DRAG_THRESHOLD` moves the window and swallows the click its release
+ * would send; one that stays put clicks. Tauri's drag region cannot do
+ * this, as it starts the window drag on the press and the click never
+ * comes, so a button inside it is never a handle.
+ */
+export function useClickOrDrag(
+	onClick: () => void,
+	drag: () => void = startPanelDrag,
+): {
+	onPointerDown: (event: PointerEvent) => void;
+	onPointerMove: (event: PointerEvent) => void;
+	onClick: (event: MouseEvent) => void;
+} {
+	const press = useRef<{ x: number; y: number } | undefined>(undefined);
+	const dragged = useRef(false);
+	return {
+		onPointerDown(event) {
+			dragged.current = false;
+			press.current =
+				event.button === 0 ? { x: event.clientX, y: event.clientY } : undefined;
+		},
+		onPointerMove(event) {
+			const start = press.current;
+			if (!start || (event.buttons & 1) === 0) {
+				press.current = undefined;
+				return;
+			}
+			if (
+				Math.hypot(event.clientX - start.x, event.clientY - start.y) >=
+				DRAG_THRESHOLD
+			) {
+				press.current = undefined;
+				dragged.current = true;
+				drag();
+			}
+		},
+		onClick(event) {
+			if (dragged.current) {
+				dragged.current = false;
+				event.preventDefault();
+				return;
+			}
+			onClick();
+		},
+	};
 }

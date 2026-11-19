@@ -13,12 +13,13 @@ import {
 	PanelBar,
 	pushLevel,
 } from "./panel-bar";
-import { useReportSize } from "./panel-shell";
+import { useClickOrDrag, useReportSize } from "./panel-shell";
 
 /**
  * The recording bubble (`#/panel/bubble`): the Swift `RecordingBubbleView`
  * over the `recording` snapshot. Shown by the shell for every recorder
- * state but idle. The body opens the live meeting in the main window; the
+ * state but idle. The body opens the live meeting in the main window on a
+ * click and drags the panel on a press that moves (`useClickOrDrag`); the
  * square stops the recording; while the auto-stop is armed, a second row
  * says when and offers "Keep recording" over the draining hairline.
  */
@@ -99,6 +100,8 @@ export function RecordingBubble() {
 		});
 	};
 
+	const body = useClickOrDrag(open);
+
 	return (
 		<PanelBar
 			className="relative max-w-[480px] flex-col items-stretch p-1.5"
@@ -107,10 +110,10 @@ export function RecordingBubble() {
 		>
 			<div className="flex min-h-7 items-center gap-2.5">
 				<button
+					{...body}
 					aria-label={presentation.text ?? "Recording"}
 					className="flex items-center gap-2.5 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-focus"
 					data-testid="bubble-open"
-					onClick={open}
 					title="Open the meeting in Steno"
 					type="button"
 				>

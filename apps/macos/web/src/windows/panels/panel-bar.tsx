@@ -10,19 +10,21 @@ import { cn } from "@/lib/cn";
 
 /**
  * The pill: popover fill (opaque in both appearances), a hairline border,
- * the `2xl` radius (the web scale's nearest to the Swift `Theme.Radius.xl`),
- * the pop shadow that a floating surface over arbitrary
- * content needs. `data-tauri-drag-region` lets the user drag the panel by
- * its background; buttons inside stop the drag by being buttons.
+ * the `2xl` radius (the web scale's nearest to the Swift `Theme.Radius.xl`).
+ * No CSS shadow: the window is the pill's size and would clip it to a grey
+ * band; on macOS the panel's own shadow follows the pill's rounded alpha.
+ * `data-tauri-drag-region="deep"` drags the panel from anywhere in the
+ * pill, its text and bars included; buttons stop the drag by being
+ * buttons, and the bubble's body takes a drag through `useClickOrDrag`.
  */
 export function PanelBar({ className, ...props }: ComponentProps<"div">) {
 	return (
 		<div
 			className={cn(
-				"surface-popover inline-flex items-center rounded-2xl border border-border bg-popover text-foreground shadow-pop",
+				"surface-popover inline-flex items-center rounded-2xl border border-border bg-popover text-foreground",
 				className,
 			)}
-			data-tauri-drag-region
+			data-tauri-drag-region="deep"
 			{...props}
 		/>
 	);
