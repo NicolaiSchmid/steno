@@ -1,9 +1,9 @@
 import { XIcon } from "lucide-react";
 import { useRef } from "react";
 import appIcon from "@/assets/app-icon.png";
-import { Button, focusRingClass } from "@/components/ui";
+import { Button } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import { PanelBar } from "./panel-bar";
+import { PanelBar, softButtonClass } from "./panel-bar";
 import {
 	type PanelAction,
 	type PanelShell,
@@ -83,8 +83,8 @@ export function DetectionPrompt({
 			<button
 				aria-label="Record with Steno"
 				className={cn(
-					"ml-auto inline-flex h-12 shrink-0 select-none items-center gap-2.5 rounded-xl border border-border bg-accent pr-4 pl-2.5 font-semibold text-foreground text-reading transition-colors duration-(--duration-functional) ease-standard hover:bg-row-pressed",
-					focusRingClass,
+					softButtonClass,
+					"ml-auto h-12 gap-2.5 pr-4 pl-2.5 font-semibold text-reading",
 				)}
 				data-testid="prompt-record"
 				onClick={() => answer("recordFromPrompt")}

@@ -1,4 +1,5 @@
 import type { ComponentProps } from "react";
+import { focusRingClass } from "@/components/ui";
 import { cn } from "@/lib/cn";
 
 /**
@@ -30,6 +31,16 @@ export function PanelBar({ className, ...props }: ComponentProps<"div">) {
 	);
 }
 
+/**
+ * The panels' soft button, Jamie's: a 48 px (or square 40 px) step of the
+ * accent fill under a hairline, darker on hover. The prompt's Record and the
+ * bubble's Stop.
+ */
+export const softButtonClass = cn(
+	"inline-flex shrink-0 select-none items-center justify-center rounded-xl border border-border bg-accent text-foreground transition-colors duration-(--duration-functional) ease-standard hover:bg-row-pressed disabled:pointer-events-none disabled:opacity-64",
+	focusRingClass,
+);
+
 /** The last five level samples as bar fractions, newest last. */
 export const LIVE_BARS = 5;
 
@@ -44,24 +55,27 @@ export const EMPTY_HISTORY: readonly number[] = Array.from(
 	() => 0,
 );
 
-/** Five 3 px bars, heights 4 to 16 px from the history, newest trailing. */
+/**
+ * Five 3 px bars, heights 4 to 20 px from the history, newest trailing,
+ * centred like a waveform and drawn without a track.
+ */
 export function LiveBars({ history }: { history: readonly number[] }) {
 	return (
 		<span
 			aria-hidden="true"
-			className="flex h-4 items-center gap-0.5"
+			className="flex h-5 items-center gap-[3px]"
 			data-testid="live-bars"
 		>
 			{history.map((fraction, index) => (
 				<span
-					className="relative block h-4 w-[3px] overflow-hidden rounded-full bg-border"
+					className="relative block h-5 w-[3px]"
 					// The position is the identity: the bars shift left as samples arrive.
 					// biome-ignore lint/suspicious/noArrayIndexKey: fixed slots
 					key={index}
 				>
 					<span
-						className="absolute inset-x-0 bottom-0 block rounded-full bg-foreground transition-[height] duration-(--duration-functional) ease-standard motion-reduce:transition-none"
-						style={{ height: `${4 + 12 * fraction}px` }}
+						className="absolute inset-x-0 top-1/2 block -translate-y-1/2 rounded-full bg-foreground transition-[height] duration-(--duration-functional) ease-standard motion-reduce:transition-none"
+						style={{ height: `${4 + 16 * fraction}px` }}
 					/>
 				</span>
 			))}
