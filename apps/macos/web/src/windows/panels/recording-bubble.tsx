@@ -1,8 +1,9 @@
 import { SquareIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import appIcon from "@/assets/app-icon.png";
 import type { RecordingSnapshot } from "@/bridge/contract";
 import { send, useBridge, usePageReady, useSnapshot } from "@/bridge/hooks";
-import { Button, RecordMark } from "@/components/ui";
+import { focusRingClass } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { useCountdownSeconds, useElapsedSeconds } from "@/lib/use-now";
 import { format } from "@/windows/main/format";
@@ -12,13 +13,16 @@ import {
 	LiveBars,
 	PanelBar,
 	pushLevel,
+	softButtonClass,
 } from "./panel-bar";
-import { useReportSize } from "./panel-shell";
+import { useClickOrDrag, useReportSize } from "./panel-shell";
 
 /**
- * The recording bubble (`#/panel/bubble`): the Swift `RecordingBubbleView`
- * over the `recording` snapshot. Shown by the shell for every recorder
- * state but idle. The body opens the live meeting in the main window; the
+ * The recording bubble (`#/panel/bubble`), in the detection prompt's
+ * language, over the `recording` snapshot: the app icon with a red dot
+ * while live, the waveform and the clock, and a soft square Stop. Shown by the shell for every recorder
+ * state but idle. The body opens the live meeting in the main window on a
+ * click and drags the panel on a press that moves (`useClickOrDrag`); the
  * square stops the recording; while the auto-stop is armed, a second row
  * says when and offers "Keep recording" over the draining hairline.
  */
@@ -99,33 +103,52 @@ export function RecordingBubble() {
 		});
 	};
 
+	const body = useClickOrDrag(open);
+
 	return (
 		<PanelBar
-			className="relative max-w-[480px] flex-col items-stretch p-1.5"
+			className="relative max-w-[480px] flex-col items-stretch p-2"
 			data-testid="recording-bubble"
 			ref={bar}
 		>
-			<div className="flex min-h-7 items-center gap-2.5">
+			<div className="flex items-center gap-2">
 				<button
+					{...body}
 					aria-label={presentation.text ?? "Recording"}
-					className="flex items-center gap-2.5 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-focus"
+					className={cn(
+						"flex h-10 items-center gap-3 rounded-xl pr-2.5 pl-1.5 text-left transition-colors duration-(--duration-functional) ease-standard hover:bg-accent",
+						focusRingClass,
+					)}
 					data-testid="bubble-open"
-					onClick={open}
 					title="Open the meeting in Steno"
 					type="button"
 				>
-					<span className="flex size-5 items-center justify-center rounded-md bg-card">
-						<RecordMark pulse={recording?.state === "recording"} />
+					<span className="relative shrink-0">
+						<img
+							alt=""
+							className="size-7 rounded-md"
+							draggable={false}
+							height={28}
+							src={appIcon}
+							width={28}
+						/>
+						{recording?.state === "recording" ? (
+							<span
+								aria-hidden="true"
+								className="absolute -top-0.5 -right-0.5 size-2.5 animate-status-pulse rounded-full bg-live ring-2 ring-popover"
+								data-testid="bubble-live-dot"
+							/>
+						) : null}
 					</span>
 					{presentation.text ? (
-						<span className="text-meta text-muted-foreground">
+						<span className="text-label text-muted-foreground">
 							{presentation.text}
 						</span>
 					) : (
 						<>
 							{presentation.showsBars ? <LiveBars history={history} /> : null}
 							<span
-								className="font-mono text-meta text-muted-foreground tabular-nums"
+								className="font-semibold text-foreground text-reading tabular-nums"
 								data-testid="bubble-elapsed"
 							>
 								{format.duration(elapsed)}
@@ -134,29 +157,34 @@ export function RecordingBubble() {
 					)}
 				</button>
 				{presentation.autoStop ? (
-					<Button
-						className="ml-auto"
+					<button
+						className={cn(
+							softButtonClass,
+							"ml-auto h-10 px-3.5 font-medium text-label",
+						)}
 						data-testid="bubble-keep-recording"
 						onClick={() => send(client, "recording.keepGoing")}
-						size="sm"
-						variant="outline"
+						type="button"
 					>
 						Keep recording
-					</Button>
+					</button>
 				) : null}
 				{presentation.showsStop ? (
-					<Button
+					<button
 						aria-label="Stop recording"
-						className={cn(!presentation.autoStop && "ml-auto")}
+						className={cn(
+							softButtonClass,
+							"size-10",
+							!presentation.autoStop && "ml-auto",
+						)}
 						data-testid="bubble-stop"
 						disabled={!presentation.stopEnabled}
 						onClick={() => send(client, "recording.stop")}
-						size="icon-sm"
 						title="Stop recording"
-						variant="outline"
+						type="button"
 					>
-						<SquareIcon className="fill-current text-destructive" />
-					</Button>
+						<SquareIcon className="size-3.5 fill-current text-live" />
+					</button>
 				) : null}
 			</div>
 			{presentation.autoStop ? (
@@ -179,13 +207,11 @@ function AutoStopLine({
 	return (
 		<>
 			<p
-				className="truncate px-1.5 pt-1 pb-2 text-body text-foreground"
+				className="truncate px-1.5 pt-1.5 pb-2.5 text-foreground text-label"
 				data-testid="bubble-auto-stop"
 			>
 				{autoStop.reason.replace(/[.!?]$/, "")}: stops in{" "}
-				<span className="font-mono tabular-nums">
-					{format.countdown(remaining)}
-				</span>
+				<span className="tabular-nums">{format.countdown(remaining)}</span>
 			</p>
 			<CountdownHairline
 				fractionRemaining={

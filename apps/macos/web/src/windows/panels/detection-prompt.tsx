@@ -1,8 +1,9 @@
 import { XIcon } from "lucide-react";
 import { useRef } from "react";
-import { Button, RecordMark } from "@/components/ui";
-import { useCountdownSeconds } from "@/lib/use-now";
-import { CountdownHairline, PanelBar } from "./panel-bar";
+import appIcon from "@/assets/app-icon.png";
+import { Button } from "@/components/ui";
+import { cn } from "@/lib/cn";
+import { PanelBar, softButtonClass } from "./panel-bar";
 import {
 	type PanelAction,
 	type PanelShell,
@@ -12,11 +13,11 @@ import {
 
 /**
  * The detection prompt
- * (`#/panel/prompt?app=<name>&seconds=<n>&raised=<n>`): the Swift
- * `DetectionPromptView` in the pill language. "<App> opened the
- * microphone", one line under it, one primary Record button, an X, and the
- * draining hairline along the bottom. No number: nothing is at stake when
- * the prompt closes. The shell opens the panel with the request in the
+ * (`#/panel/prompt?app=<name>&seconds=<n>&raised=<n>`), laid out as
+ * Jamie's: "<App> opened the microphone" and one line under it, a soft
+ * Record button carrying the app icon, and a quiet X. No countdown on
+ * screen: nothing is at stake when the prompt closes, and the host times
+ * it out. The shell opens the panel with the request in the
  * route and hides it when the host clears the prompt. Both buttons tell
  * the shell which prompt they were: the X dismisses it, Record has the
  * host's detection controller record the call, attributed to the app the
@@ -52,7 +53,6 @@ export function DetectionPrompt({
 	request: PromptRequest;
 	shell?: PanelShell;
 }) {
-	const remaining = Math.max(0, useCountdownSeconds(request.seconds));
 	const bar = useRef<HTMLDivElement>(null);
 	useReportSize(bar, shell);
 	const answer = (action: PanelAction) => {
@@ -65,32 +65,41 @@ export function DetectionPrompt({
 
 	return (
 		<PanelBar
-			className="relative h-14 min-w-[360px] max-w-[480px] gap-4 pr-2 pl-4"
+			className="h-18 min-w-[400px] max-w-[560px] gap-5 pr-3 pl-6"
 			data-testid="detection-prompt"
 			ref={bar}
 		>
 			<div className="flex min-w-0 flex-col gap-0.5">
 				<p
-					className="truncate text-foreground text-title"
+					className="truncate font-semibold text-foreground text-reading"
 					data-testid="prompt-title"
 				>
 					{request.appName} opened the microphone
 				</p>
-				<p className="truncate text-meta text-muted-foreground">
+				<p className="truncate text-label text-muted-foreground">
 					Record with Steno? Audio stays on this device.
 				</p>
 			</div>
-			<Button
+			<button
 				aria-label="Record with Steno"
-				className="ml-auto"
+				className={cn(
+					softButtonClass,
+					"ml-auto h-12 gap-2.5 pr-4 pl-2.5 font-semibold text-reading",
+				)}
 				data-testid="prompt-record"
 				onClick={() => answer("recordFromPrompt")}
-				size="md"
-				variant="primary"
+				type="button"
 			>
-				<RecordMark />
+				<img
+					alt=""
+					className="size-7 rounded-md"
+					draggable={false}
+					height={28}
+					src={appIcon}
+					width={28}
+				/>
 				Record
-			</Button>
+			</button>
 			<Button
 				aria-label="Not now"
 				data-testid="prompt-dismiss"
@@ -101,7 +110,6 @@ export function DetectionPrompt({
 			>
 				<XIcon />
 			</Button>
-			<CountdownHairline fractionRemaining={remaining / request.seconds} />
 		</PanelBar>
 	);
 }

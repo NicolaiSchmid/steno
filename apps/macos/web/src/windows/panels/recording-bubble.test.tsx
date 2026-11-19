@@ -78,6 +78,7 @@ describe("RecordingBubble", () => {
 			"12:34",
 		);
 		expect(screen.getByTestId("live-bars")).toBeInTheDocument();
+		expect(screen.getByTestId("bubble-live-dot")).toBeInTheDocument();
 		expect(
 			screen.getByRole("button", { name: "Stop recording" }),
 		).toBeEnabled();
